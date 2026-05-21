@@ -237,8 +237,9 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                             caption=f"✅ تم التحميل بنجاح\n🔗 @smart_creators_bot",
                             reply_markup=keyboard,
                             write_timeout=120,
-                            read_timeout=120,
-                            connect_timeout=120,
+                            write_timeout=300,
+                            read_timeout=300,
+                            connect_timeout=300,
                         )
                     else:
                         await message.reply_video(
@@ -247,12 +248,16 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                             duration=duration if duration > 0 else None,
                             width=width if width > 0 else None,
                             height=height if height > 0 else None,
-                            caption=f"✅ تم التحميل بنجاح | {quality_label}\n🔗 @smart_creators_bot",
+                            caption=(
+                                f"✨ تم التحسين بنجاح | {quality_label}\n🔗 @smart_creators_bot"
+                                if quality == "enhance" else
+                                f"✅ تم التحميل بنجاح | {quality_label}\n🔗 @smart_creators_bot"
+                            ),
                             reply_markup=keyboard,
                             supports_streaming=True,
-                            write_timeout=120,
-                            read_timeout=120,
-                            connect_timeout=120,
+                            write_timeout=300,
+                            read_timeout=300,
+                            connect_timeout=300,
                         )
             finally:
                 if thumbnail_file:

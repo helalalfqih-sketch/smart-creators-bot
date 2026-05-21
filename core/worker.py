@@ -213,21 +213,19 @@ async def enhance_video(
             str(out_path),
         ]
     else:
-        # Video: denoise → sharpen → upscale → normalize audio
+        # Video: denoise → sharpen only (no upscaling to keep file size manageable)
         vf_filters = (
-            f"hqdn3d=4:3:6:4.5,"          # noise reduction
-            f"unsharp=5:5:1.0:5:5:0.0,"   # sharpen edges
-            f"scale=-2:{target_height}:flags=lanczos"  # upscale with Lanczos
+            "hqdn3d=3:2:4:3.5,"           # lighter noise reduction
+            "unsharp=3:3:0.8:3:3:0.0"     # sharpen edges (no chroma sharpen)
         )
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-i", str(input_path),
             "-vf", vf_filters,
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",              # high quality (lower = better, 18 is near-lossless)
-            "-c:a", "aac", "-b:a", "192k",
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-preset", "veryfast",         # faster encoding
+            "-crf", "22",                  # balanced quality/size
+            "-c:a", "copy",                # copy audio without re-encoding (faster)
             str(out_path),
         ]
 
