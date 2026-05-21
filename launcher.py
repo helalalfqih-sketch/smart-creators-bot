@@ -7,6 +7,24 @@ import subprocess
 import sys
 import signal
 import time
+from pathlib import Path
+
+# ── Load .env before spawning subprocesses (inherited by children) ──────────
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    with open(_env_file, encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _key, _, _val = _line.partition("=")
+            _key = _key.strip()
+            _val = _val.strip().strip('"').strip("'")
+            if _key and _key not in os.environ:   # don't override Railway vars
+                os.environ[_key] = _val
+    print(f"✅ Loaded .env from {_env_file}")
+else:
+    print("⚠️  .env not found — relying on Railway environment variables")
 
 PORT = os.environ.get("PORT", "8080")
 
