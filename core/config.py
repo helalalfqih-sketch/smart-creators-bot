@@ -6,6 +6,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Load .env file if present (local dev OR Railway with .env committed)
+try:
+    from dotenv import load_dotenv, find_dotenv
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+except ImportError:
+    pass  # python-dotenv not installed – rely on system env vars
+
 
 def _env(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()

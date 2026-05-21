@@ -47,7 +47,7 @@ env/
 .env/
 
 ### Project specific ###
-.env
+# .env  ← now committed so Railway can load it via python-dotenv
 downloads/
 *.mp4
 *.webm
