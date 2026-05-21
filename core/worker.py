@@ -231,6 +231,9 @@ async def enhance_video(
             str(out_path),
         ]
 
+    # Capture the running loop BEFORE entering the thread
+    loop = asyncio.get_running_loop()
+
     def run_ffmpeg() -> int:
         import subprocess
         proc = subprocess.Popen(
@@ -239,9 +242,8 @@ async def enhance_video(
             stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
         )
-        loop = asyncio.get_event_loop()
         for line in proc.stdout:
-            # FFmpeg outputs time= in stderr; we use it as a rough progress hint
+            # Use the captured loop from the async context
             if "time=" in line and on_progress:
                 try:
                     asyncio.run_coroutine_threadsafe(
@@ -254,6 +256,7 @@ async def enhance_video(
         return proc.returncode
 
     returncode = await asyncio.to_thread(run_ffmpeg)
+
 
     if returncode != 0 or not out_path.exists():
         logger.warning("FFmpeg enhancement failed, returning original file")
