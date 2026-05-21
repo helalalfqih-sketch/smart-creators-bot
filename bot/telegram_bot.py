@@ -55,6 +55,7 @@ QUALITY_OPTIONS = [
     ("🎬 720p",  "720"),
     ("🖥 1080p", "1080"),
     ("⚡ أفضل جودة", "best"),
+    ("✨ تحسين الجودة", "enhance"),
 ]
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -198,10 +199,23 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
 
             is_audio = file_path.suffix.lower() in {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus"} or (width == 0 and height == 0)
 
+            # ── Enhancement step ──────────────────────────────────────────────
+            if quality == "enhance" and not is_audio:
+                from core.worker import enhance_video
+                await status_msg.edit_text(
+                    "✨ *جاري تحسين الجودة بـ FFmpeg...*\n"
+                    "هذا يستغرق لحظة إضافية ⏳",
+                    parse_mode="Markdown",
+                )
+                file_path = await enhance_video(file_path)
+
             if is_audio:
                 await status_msg.edit_text("📤 جاري إرسال الصوت إليك...")
+            elif quality == "enhance":
+                await status_msg.edit_text("📤 جاري إرسال الفيديو المحسّن إليك... ✨")
             else:
                 await status_msg.edit_text("📤 جاري إرسال الفيديو إليك...")
+
 
             redownload_key = _store_url(context, url)
             keyboard = InlineKeyboardMarkup(

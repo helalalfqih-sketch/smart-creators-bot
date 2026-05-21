@@ -166,6 +166,7 @@ async def download_video(
     return result_path
 
 
+
 # ── Cleanup helper ────────────────────────────────────────────────────────────
 
 async def cleanup_file(path: Path) -> None:
@@ -175,3 +176,92 @@ async def cleanup_file(path: Path) -> None:
         logger.info("Deleted %s", path)
     except OSError as exc:
         logger.warning("Could not delete %s: %s", path, exc)
+
+
+# ── Video Enhancement ─────────────────────────────────────────────────────────
+
+async def enhance_video(
+    input_path: Path,
+    *,
+    target_height: int = 1080,
+    on_progress: ProgressCallback | None = None,
+) -> Path:
+    """
+    Enhance video quality using FFmpeg professional filters:
+      - hqdn3d: High quality 3D denoiser (removes noise/grain)
+      - unsharp: Sharpens edges and fine details
+      - scale: Upscales using Lanczos algorithm (best quality)
+      - loudnorm: Normalizes audio levels
+
+    Returns the enhanced file path (new file, input is preserved).
+    """
+    if on_progress:
+        await on_progress("✨ جاري تحسين الجودة...", 0.0)
+
+    out_path = input_path.parent / f"{input_path.stem}_enhanced.mp4"
+
+    # Determine if file has video stream
+    is_audio = input_path.suffix.lower() in {".mp3", ".m4a", ".wav", ".ogg", ".flac"}
+
+    if is_audio:
+        # Audio-only: just normalize loudness
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_path),
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-c:a", "aac", "-b:a", "192k",
+            str(out_path),
+        ]
+    else:
+        # Video: denoise → sharpen → upscale → normalize audio
+        vf_filters = (
+            f"hqdn3d=4:3:6:4.5,"          # noise reduction
+            f"unsharp=5:5:1.0:5:5:0.0,"   # sharpen edges
+            f"scale=-2:{target_height}:flags=lanczos"  # upscale with Lanczos
+        )
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_path),
+            "-vf", vf_filters,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",              # high quality (lower = better, 18 is near-lossless)
+            "-c:a", "aac", "-b:a", "192k",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            str(out_path),
+        ]
+
+    def run_ffmpeg() -> int:
+        import subprocess
+        proc = subprocess.Popen(
+            ffmpeg_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        loop = asyncio.get_event_loop()
+        for line in proc.stdout:
+            # FFmpeg outputs time= in stderr; we use it as a rough progress hint
+            if "time=" in line and on_progress:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        on_progress("✨ جاري تحسين الجودة...", 50.0),
+                        loop,
+                    )
+                except Exception:
+                    pass
+        proc.wait()
+        return proc.returncode
+
+    returncode = await asyncio.to_thread(run_ffmpeg)
+
+    if returncode != 0 or not out_path.exists():
+        logger.warning("FFmpeg enhancement failed, returning original file")
+        return input_path  # fallback to original
+
+    if on_progress:
+        await on_progress("✅ تم تحسين الجودة!", 100.0)
+
+    logger.info("Enhanced video saved to %s", out_path)
+    return out_path
+
