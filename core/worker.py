@@ -49,7 +49,7 @@ _QUALITY_FORMAT: dict[str, str] = {
 
 
 # Bump this version when format strings change to invalidate all stale cache entries
-_CACHE_VERSION = "v3"
+_CACHE_VERSION = "v4"
 
 def _url_cache_key(url: str) -> str:
     return f"dl:{_CACHE_VERSION}:" + hashlib.sha256(url.encode()).hexdigest()
@@ -100,7 +100,7 @@ async def download_video(
         "-S", "ext:mp4:m4a",      # prefer mp4 extension when available
         "--max-filesize", str(max_bytes),
         "--merge-output-format", "mp4",
-        "--remux-video", "mp4",    # remux to mp4 container after download
+        "--impersonate", "chrome", # bypass TikTok CDN restrictions
         "-o", out_template,
         url,
     ]

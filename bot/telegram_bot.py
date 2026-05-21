@@ -215,6 +215,10 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                 quality == "audio"
                 or _ext in _pure_audio_exts
                 or (_ext in _maybe_audio_exts and width == 0 and height == 0)
+                # Any file with no video stream (width=0, height=0) is audio-only
+                # This catches audio remuxed into mp4 container
+                or (width == 0 and height == 0 and quality != "audio" and _ext not in _pure_audio_exts
+                    and _ext not in _maybe_audio_exts)
             )
 
             # ── Enhancement step ──────────────────────────────────────────────
