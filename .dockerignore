@@ -1,5 +1,7 @@
-.env
-.env.*
+# .env is committed to git and needed in the image (python-dotenv reads it)
+# .env.*  ← keep excluding other variants
+.env.local
+.env.test
 !.env.example
 __pycache__/
 *.pyc
