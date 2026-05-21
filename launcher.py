@@ -10,6 +10,12 @@ import time
 
 PORT = os.environ.get("PORT", "8080")
 
+# ── Fix port mismatch ──────────────────────────────────────────────────────────
+# Railway sets PORT (e.g. 8080) for external traffic.
+# We run uvicorn on that same PORT, so override DOWNLOAD_API_URL to match.
+os.environ["DOWNLOAD_API_URL"] = f"http://localhost:{PORT}"
+print(f"🔧 DOWNLOAD_API_URL set to http://localhost:{PORT}")
+
 print(f"🚀 Starting FastAPI on port {PORT}...")
 api_proc = subprocess.Popen([
     sys.executable, "-m", "uvicorn", "main:app",
