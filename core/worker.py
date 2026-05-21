@@ -37,14 +37,15 @@ ProgressCallback = Callable[[str, float], Awaitable[None]]
 # TikTok uses combined formats (bytevc1/h264) not separate video+audio streams,
 # so we avoid [ext=mp4]+[ext=m4a] pattern and use height-only filtering.
 # The --merge-output-format mp4 flag in the command handles container conversion.
+# vcodec!="none" ensures we never silently fall back to audio-only streams.
+_VIDEO_BASE = "bestvideo+bestaudio/best[vcodec!='none']"
 _QUALITY_FORMAT: dict[str, str] = {
-    # Try exact height first, then best ≤ that height, then absolute best
-    "144":  "bestvideo[height=144]+bestaudio/best[height=144]/bestvideo[height<=144]+bestaudio/best[height<=144]/worst",
-    "360":  "bestvideo[height=360]+bestaudio/best[height=360]/bestvideo[height<=360]+bestaudio/best[height<=360]/worst",
-    "480":  "bestvideo[height=480]+bestaudio/best[height=480]/bestvideo[height<=480]+bestaudio/best[height<=480]/best",
-    "720":  "bestvideo[height=720]+bestaudio/best[height=720]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-    "1080": "bestvideo[height=1080]+bestaudio/best[height=1080]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-    "best": YTDLP_FORMAT,
+    "144":  f"bestvideo[height=144]+bestaudio/best[height<=144][vcodec!='none']/bestvideo[height<=144]+bestaudio/{_VIDEO_BASE}",
+    "360":  f"bestvideo[height=360]+bestaudio/best[height<=360][vcodec!='none']/bestvideo[height<=360]+bestaudio/{_VIDEO_BASE}",
+    "480":  f"bestvideo[height=480]+bestaudio/best[height<=480][vcodec!='none']/bestvideo[height<=480]+bestaudio/{_VIDEO_BASE}",
+    "720":  f"bestvideo[height=720]+bestaudio/best[height<=720][vcodec!='none']/bestvideo[height<=720]+bestaudio/{_VIDEO_BASE}",
+    "1080": f"bestvideo[height=1080]+bestaudio/best[height<=1080][vcodec!='none']/bestvideo[height<=1080]+bestaudio/{_VIDEO_BASE}",
+    "best": _VIDEO_BASE,
     "audio": "bestaudio/best",   # audio-only → will be sent as voice/audio message
 }
 
