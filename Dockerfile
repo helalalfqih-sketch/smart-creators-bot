@@ -17,6 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy project files
 COPY . .
+# Explicitly copy .env so it's always present (not excluded by build-cache quirks)
+COPY .env .env
 
 # Create downloads directory
 RUN mkdir -p downloads

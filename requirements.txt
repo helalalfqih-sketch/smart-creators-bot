@@ -1,4 +1,4 @@
-# cache-bust: 2026-05-21-v2 — force fresh Docker build
+# cache-bust: 2026-05-21-v3 — force fresh Docker build with .env included
 python-telegram-bot>=22.0,<23.0
 aiohttp>=3.10,<4.0
 fastapi>=0.115,<1.0
