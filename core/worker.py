@@ -34,18 +34,16 @@ ProgressCallback = Callable[[str, float], Awaitable[None]]
 """Signature: (status_text, percent_0_to_100) -> None"""
 
 # Quality → yt-dlp format string
-# TikTok uses combined formats (bytevc1/h264) not separate video+audio streams,
-# so we avoid [ext=mp4]+[ext=m4a] pattern and use height-only filtering.
-# The --merge-output-format mp4 flag in the command handles container conversion.
-# vcodec!="none" ensures we never silently fall back to audio-only streams.
-_VIDEO_BASE = "bestvideo+bestaudio/best[vcodec!='none']"
+# TikTok delivers combined (merged) video+audio streams, not separate ones.
+# bestvideo+bestaudio fails for TikTok → use best[height<=X] with codec filter.
+# vcodec!="none" prevents audio-only fallback.
 _QUALITY_FORMAT: dict[str, str] = {
-    "144":  f"bestvideo[height=144]+bestaudio/best[height<=144][vcodec!='none']/bestvideo[height<=144]+bestaudio/{_VIDEO_BASE}",
-    "360":  f"bestvideo[height=360]+bestaudio/best[height<=360][vcodec!='none']/bestvideo[height<=360]+bestaudio/{_VIDEO_BASE}",
-    "480":  f"bestvideo[height=480]+bestaudio/best[height<=480][vcodec!='none']/bestvideo[height<=480]+bestaudio/{_VIDEO_BASE}",
-    "720":  f"bestvideo[height=720]+bestaudio/best[height<=720][vcodec!='none']/bestvideo[height<=720]+bestaudio/{_VIDEO_BASE}",
-    "1080": f"bestvideo[height=1080]+bestaudio/best[height<=1080][vcodec!='none']/bestvideo[height<=1080]+bestaudio/{_VIDEO_BASE}",
-    "best": _VIDEO_BASE,
+    "144":  "best[height<=144][vcodec!='none']/best[height<=480][vcodec!='none']/best[vcodec!='none']/best",
+    "360":  "best[height<=360][vcodec!='none']/best[height<=480][vcodec!='none']/best[vcodec!='none']/best",
+    "480":  "best[height<=480][vcodec!='none']/best[vcodec!='none']/best",
+    "720":  "best[height<=720][vcodec!='none']/best[vcodec!='none']/best",
+    "1080": "best[height<=1080][vcodec!='none']/best[vcodec!='none']/best",
+    "best": "best[vcodec!='none']/best",
     "audio": "bestaudio/best",   # audio-only → will be sent as voice/audio message
 }
 
