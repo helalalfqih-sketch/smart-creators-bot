@@ -48,8 +48,11 @@ _QUALITY_FORMAT: dict[str, str] = {
 }
 
 
+# Bump this version when format strings change to invalidate all stale cache entries
+_CACHE_VERSION = "v2"
+
 def _url_cache_key(url: str) -> str:
-    return "dl:" + hashlib.sha256(url.encode()).hexdigest()
+    return f"dl:{_CACHE_VERSION}:" + hashlib.sha256(url.encode()).hexdigest()
 
 
 async def download_video(
