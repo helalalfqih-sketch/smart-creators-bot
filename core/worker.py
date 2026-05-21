@@ -34,22 +34,22 @@ ProgressCallback = Callable[[str, float], Awaitable[None]]
 """Signature: (status_text, percent_0_to_100) -> None"""
 
 # Quality → yt-dlp format string
-# TikTok delivers combined (merged) video+audio streams, not separate ones.
-# bestvideo+bestaudio fails for TikTok → use best[height<=X] with codec filter.
-# vcodec!="none" prevents audio-only fallback.
+# TikTok serves mp4 as the video container. Filtering by ext=mp4 is more
+# reliable than vcodec!='none' because TikTok uses bytevc1 which yt-dlp
+# may not recognize in vcodec filters. --merge-output-format mp4 handles muxing.
 _QUALITY_FORMAT: dict[str, str] = {
-    "144":  "best[height<=144][vcodec!='none']/best[height<=480][vcodec!='none']/best[vcodec!='none']/best",
-    "360":  "best[height<=360][vcodec!='none']/best[height<=480][vcodec!='none']/best[vcodec!='none']/best",
-    "480":  "best[height<=480][vcodec!='none']/best[vcodec!='none']/best",
-    "720":  "best[height<=720][vcodec!='none']/best[vcodec!='none']/best",
-    "1080": "best[height<=1080][vcodec!='none']/best[vcodec!='none']/best",
-    "best": "best[vcodec!='none']/best",
+    "144":  "best[height<=144][ext=mp4]/best[height<=360][ext=mp4]/best[ext=mp4]/best",
+    "360":  "best[height<=360][ext=mp4]/best[ext=mp4]/best",
+    "480":  "best[height<=480][ext=mp4]/best[ext=mp4]/best",
+    "720":  "best[height<=720][ext=mp4]/best[ext=mp4]/best",
+    "1080": "best[height<=1080][ext=mp4]/best[ext=mp4]/best",
+    "best": "best[ext=mp4]/best",
     "audio": "bestaudio/best",   # audio-only → will be sent as voice/audio message
 }
 
 
 # Bump this version when format strings change to invalidate all stale cache entries
-_CACHE_VERSION = "v2"
+_CACHE_VERSION = "v3"
 
 def _url_cache_key(url: str) -> str:
     return f"dl:{_CACHE_VERSION}:" + hashlib.sha256(url.encode()).hexdigest()
@@ -97,8 +97,10 @@ async def download_video(
         "--newline",                # one progress line per update
         "--progress",
         "-f", fmt,
+        "-S", "ext:mp4:m4a",      # prefer mp4 extension when available
         "--max-filesize", str(max_bytes),
         "--merge-output-format", "mp4",
+        "--remux-video", "mp4",    # remux to mp4 container after download
         "-o", out_template,
         url,
     ]
