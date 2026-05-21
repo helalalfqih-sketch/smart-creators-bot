@@ -56,6 +56,7 @@ QUALITY_OPTIONS = [
     ("🖥 1080p", "1080"),
     ("⚡ أفضل جودة", "best"),
     ("✨ تحسين الجودة", "enhance"),
+    ("🚀 نشر احترافي", "pro"),
 ]
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -272,6 +273,102 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
         await status_msg.edit_text(f"❌ خطأ:\n{exc}")
 
 
+# ── Pro Pipeline ────────────────────────────────────────────────────────────────────
+
+async def _run_pro_pipeline(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    video_path: Path,
+    watermark: str,
+    status_msg: Message,
+) -> None:
+    """تشغيل البايبلاين الاحترافي: تفريغ صوتي + كابشن + watermark."""
+    from core.captions import make_pro_video
+
+    async def on_progress(text: str, pct: float) -> None:
+        bar = _progress_bar(pct)
+        try:
+            await status_msg.edit_text(f"{text}\n{bar}")
+        except Exception:
+            pass
+
+    try:
+        pro_path = await make_pro_video(
+            video_path=video_path,
+            watermark=watermark,
+            on_progress=on_progress,
+        )
+
+        await status_msg.edit_text("📤 جاري إرسال الفيديو الاحترافي... 🚀")
+
+        with open(pro_path, "rb") as f:
+            await message.reply_video(
+                video=f,
+                caption=f"🚀 فيديو احترافي | {watermark}\n🔗 @smart_creators_bot",
+                supports_streaming=True,
+                write_timeout=300,
+                read_timeout=300,
+                connect_timeout=60,
+            )
+
+        await status_msg.delete()
+
+        # Cleanup
+        for p in [pro_path]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+    except Exception as exc:
+        logger.exception("Pro pipeline error")
+        await status_msg.edit_text(f"❌ خطأ في المعالجة:\n{exc}")
+
+
+async def handle_watermark_reply(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """يستقبل اسم الواترمارك من المستخدم ويبدأ البايبلاين."""
+    message = update.effective_message
+    if not message or not message.text:
+        return
+
+    user_id = update.effective_user.id if update.effective_user else 0
+    pending_key = f"pro_pending_{user_id}"
+    pending = context.bot_data.get(pending_key)
+
+    if not pending:
+        # Not waiting for watermark — treat as normal URL message
+        await handle_url(update, context)
+        return
+
+    # Clear pending state
+    del context.bot_data[pending_key]
+
+    video_path = Path(pending["video_path"])
+    watermark = message.text.strip()
+    original_message = pending["original_message"]
+
+    if not video_path.exists():
+        await message.reply_text("❌ الفيديو انتهت صلاحيته. أرسل الرابط من جديد.")
+        return
+
+    status_msg = await message.reply_text(
+        f"✅ سيتم إضافة \"*{watermark}*\" كفاصل 🚀\n"
+        f"🎤 جاري تفريغ الكلام...",
+        parse_mode="Markdown",
+    )
+
+    await _run_pro_pipeline(
+        message=message,
+        context=context,
+        video_path=video_path,
+        watermark=watermark,
+        status_msg=status_msg,
+    )
+
+
+
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -327,6 +424,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         quality_label = quality_labels.get(quality, quality)
 
         # Edit the selection message to show "downloading" status
+        # If quality is 'pro': download at best quality then ask for watermark
+        if quality == "pro":
+            await query.message.edit_text(
+                f"🚀 *نشر احترافي*\n"
+                f"⏳ جاري تحميل الفيديو...",
+                parse_mode="Markdown",
+            )
+            # Download at best quality via API
+            timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                job_id = await _post_download(session, url, "best")
+                for _ in range(MAX_POLL_ATTEMPTS):
+                    job = await _poll_result(session, job_id)
+                    if job.get("status") == "done":
+                        break
+                    if job.get("status") == "error":
+                        await query.message.edit_text(f"❌ فشل التحميل:\n{job.get('error', '')}")
+                        return
+                    await asyncio.sleep(POLL_INTERVAL)
+                else:
+                    await query.message.edit_text("⌛ انتهت مهلة التحميل.")
+                    return
+
+            video_path = Path(job.get("file", ""))
+            if not video_path.exists():
+                await query.message.edit_text("❌ الملف غير موجود.")
+                return
+
+            # Store video path and wait for watermark reply
+            user_id = query.from_user.id if query.from_user else 0
+            context.bot_data[f"pro_pending_{user_id}"] = {
+                "video_path": str(video_path),
+                "original_message": query.message,
+            }
+            await query.message.edit_text(
+                "✅ تم التحميل!\n\n"
+                "✍️ *أدخل اسم الفاصل (Watermark)*\n"
+                "مثال: `@حلال_الفقيه`",
+                parse_mode="Markdown",
+            )
+            return
+
         await query.message.edit_text(
             f"🚀 جاري بدء التحميل...\n"
             f"📊 الجودة المختارة: *{quality_label}*",
@@ -389,7 +528,11 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).request(request_config).build()
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    # Pro watermark handler must come BEFORE general URL handler
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_watermark_reply,
+    ))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(error_handler)
 
