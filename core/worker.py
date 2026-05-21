@@ -45,6 +45,7 @@ _QUALITY_FORMAT: dict[str, str] = {
     "720":  "bestvideo[height=720]+bestaudio/best[height=720]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
     "1080": "bestvideo[height=1080]+bestaudio/best[height=1080]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
     "best": YTDLP_FORMAT,
+    "audio": "bestaudio/best",   # audio-only → will be sent as voice/audio message
 }
 
 

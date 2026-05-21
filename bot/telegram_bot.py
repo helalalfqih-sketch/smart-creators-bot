@@ -49,6 +49,7 @@ MAX_POLL_ATTEMPTS = 100    # 300 s total before giving up
 
 # Quality options: (label, yt-dlp height value sent to API)
 QUALITY_OPTIONS = [
+    ("🎧 صوت MP3",   "audio"),
     ("📱 144p",  "144"),
     ("📺 360p",  "360"),
     ("🎞 480p",  "480"),
@@ -163,7 +164,14 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
 
                 if status == "error":
                     err = job.get("error", "خطأ غير معروف")
-                    await status_msg.edit_text(f"❌ فشل التحميل:\n{err[:500]}")
+                    # Friendly message for unsupported TikTok photo posts
+                    if "Unsupported URL" in err and "/photo/" in err:
+                        await status_msg.edit_text(
+                            "❌ هذا منشور صور/سلايدشو وليس فيديو\n"
+                            "البوت يدعم فيديوهات TikTok فقط ، ليس منشورات الصور ☹️"
+                        )
+                    else:
+                        await status_msg.edit_text(f"❌ فشل التحميل:\n{err[:500]}")
                     return
 
                 # Update progress message every poll
@@ -198,7 +206,16 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
             thumbnail_path_str = job.get("thumbnail")
             thumbnail_path = Path(thumbnail_path_str) if thumbnail_path_str else None
 
-            is_audio = file_path.suffix.lower() in {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus"} or (width == 0 and height == 0)
+            # Only treat as audio if extension is purely audio-only
+            # Also always audio when user explicitly chose audio quality
+            _pure_audio_exts = {".mp3", ".wav", ".ogg", ".flac"}
+            _maybe_audio_exts = {".m4a", ".aac", ".opus"}
+            _ext = file_path.suffix.lower()
+            is_audio = (
+                quality == "audio"
+                or _ext in _pure_audio_exts
+                or (_ext in _maybe_audio_exts and width == 0 and height == 0)
+            )
 
             # ── Enhancement step ──────────────────────────────────────────────
             if quality == "enhance" and not is_audio:
