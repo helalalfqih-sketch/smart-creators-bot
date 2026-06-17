@@ -7,7 +7,7 @@ Flow:
   3. User picks a quality → Bot POSTs to FastAPI /download with quality → gets job_id
   4. Bot polls /result/{job_id} every 3 s, updating a status message
   5. Once done, bot reads the local file and sends it as a video
-  6. On error, bot shows the error message
+  6. On error, bot shows a clean temporary error message, then deletes everything to keep the channel clean.
 """
 from __future__ import annotations
 
@@ -108,6 +108,15 @@ def _get_url(context: ContextTypes.DEFAULT_TYPE, key: str) -> str | None:
     return context.bot_data.get(key)
 
 
+async def _safe_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int | None) -> None:
+    """Safely delete a message without crashing if it doesn't exist or if permissions lack."""
+    if message_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            pass
+
+
 # ── API helpers ───────────────────────────────────────────────────────────────
 
 async def _post_download(session: aiohttp.ClientSession, url: str, quality: str = "best") -> str:
@@ -130,10 +139,10 @@ async def _poll_result(session: aiohttp.ClientSession, job_id: str) -> dict:
         return await resp.json()
 
 
-# ── Core download flow (reusable) ─────────────────────────────────────────────
+# ── Core download flow ────────────────────────────────────────────────────────
 
 async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
-                        url: str, quality: str, status_msg: Message) -> None:
+                        url: str, quality: str, status_msg: Message, user_msg_id: int | None = None) -> None:
     """Shared download logic used by both direct URL and quality button handlers."""
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
 
@@ -164,14 +173,20 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
 
                 if status == "error":
                     err = job.get("error", "خطأ غير معروف")
-                    # Friendly message for unsupported TikTok photo posts
                     if "Unsupported URL" in err and "/photo/" in err:
                         await status_msg.edit_text(
-                            "❌ هذا منشور صور/سلايدشو وليس فيديو\n"
-                            "البوت يدعم فيديوهات TikTok فقط ، ليس منشورات الصور ☹️"
+                            "❌ هذا منشور صور وليس فيديو.\n"
+                            "⚠️ سيتم تنظيف القناة تلقائياً..."
                         )
                     else:
-                        await status_msg.edit_text(f"❌ فشل التحميل:\n{err[:500]}")
+                        await status_msg.edit_text(
+                            "❌ فشل التحميل: الرابط غير مدعوم أو غير صحيح.\n"
+                            "⚠️ سيتم تنظيف القناة تلقائياً..."
+                        )
+                    
+                    await asyncio.sleep(4)
+                    await _safe_delete(context, message.chat_id, user_msg_id)
+                    await _safe_delete(context, message.chat_id, status_msg.message_id)
                     return
 
                 # Update progress message every poll
@@ -186,18 +201,24 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                         action=ChatAction.UPLOAD_VIDEO,
                     )
                 except Exception:
-                    pass  # ignore if message unchanged (Telegram rejects identical edits)
+                    pass  # ignore if message unchanged
 
                 await asyncio.sleep(POLL_INTERVAL)
 
             else:
-                await status_msg.edit_text("⌛ انتهت مهلة الانتظار. حاول مجدداً.")
+                await status_msg.edit_text("⌛ انتهت مهلة الانتظار. سيتم حذف هذا التنبيه...")
+                await asyncio.sleep(4)
+                await _safe_delete(context, message.chat_id, user_msg_id)
+                await _safe_delete(context, message.chat_id, status_msg.message_id)
                 return
 
             # Step 3 – send video
             file_path = Path(job.get("file", ""))
             if not file_path.exists():
                 await status_msg.edit_text("❌ الملف غير موجود على السيرفر.")
+                await asyncio.sleep(4)
+                await _safe_delete(context, message.chat_id, user_msg_id)
+                await _safe_delete(context, message.chat_id, status_msg.message_id)
                 return
 
             duration = job.get("duration", 0)
@@ -206,8 +227,6 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
             thumbnail_path_str = job.get("thumbnail")
             thumbnail_path = Path(thumbnail_path_str) if thumbnail_path_str else None
 
-            # Only treat as audio if extension is purely audio-only
-            # Also always audio when user explicitly chose audio quality
             _pure_audio_exts = {".mp3", ".wav", ".ogg", ".flac"}
             _maybe_audio_exts = {".m4a", ".aac", ".opus"}
             _ext = file_path.suffix.lower()
@@ -215,13 +234,10 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                 quality == "audio"
                 or _ext in _pure_audio_exts
                 or (_ext in _maybe_audio_exts and width == 0 and height == 0)
-                # Any file with no video stream (width=0, height=0) is audio-only
-                # This catches audio remuxed into mp4 container
                 or (width == 0 and height == 0 and quality != "audio" and _ext not in _pure_audio_exts
                     and _ext not in _maybe_audio_exts)
             )
 
-            # ── Enhancement step ──────────────────────────────────────────────
             if quality == "enhance" and not is_audio:
                 from core.worker import enhance_video
                 await status_msg.edit_text(
@@ -237,7 +253,6 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                 await status_msg.edit_text("📤 جاري إرسال الفيديو المحسّن إليك... ✨")
             else:
                 await status_msg.edit_text("📤 جاري إرسال الفيديو إليك...")
-
 
             redownload_key = _store_url(context, url)
             keyboard = InlineKeyboardMarkup(
@@ -284,17 +299,25 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                 if thumbnail_file:
                     thumbnail_file.close()
 
-            await status_msg.delete()
+            # التخلص النهائي من الرسائل المؤقتة ورابط المستخدم لتصفية القناة تماماً
+            await _safe_delete(context, message.chat_id, user_msg_id)
+            await _safe_delete(context, message.chat_id, status_msg.message_id)
 
     except aiohttp.ClientError as exc:
         logger.exception("Network error")
-        await status_msg.edit_text(f"❌ خطأ في الاتصال بالسيرفر:\n{exc}")
+        await status_msg.edit_text("❌ خطأ في الاتصال بالسيرفر الخلفي.")
+        await asyncio.sleep(4)
+        await _safe_delete(context, message.chat_id, user_msg_id)
+        await _safe_delete(context, message.chat_id, status_msg.message_id)
     except Exception as exc:
         logger.exception("Unhandled error")
-        await status_msg.edit_text(f"❌ خطأ:\n{exc}")
+        await status_msg.edit_text("❌ حدث خطأ غير متوقع أثناء المعالجة.")
+        await asyncio.sleep(4)
+        await _safe_delete(context, message.chat_id, user_msg_id)
+        await _safe_delete(context, message.chat_id, status_msg.message_id)
 
 
-# ── Pro Pipeline ────────────────────────────────────────────────────────────────────
+# ── Pro Pipeline ──────────────────────────────────────────────────────────────
 
 async def _run_pro_pipeline(
     message: Message,
@@ -302,6 +325,8 @@ async def _run_pro_pipeline(
     video_path: Path,
     watermark: str,
     status_msg: Message,
+    user_msg_id: int | None = None,
+    watermark_msg_id: int | None = None,
 ) -> None:
     """تشغيل البايبلاين الاحترافي: تفريغ صوتي + كابشن + watermark."""
     from core.captions import make_pro_video
@@ -332,18 +357,23 @@ async def _run_pro_pipeline(
                 connect_timeout=60,
             )
 
-        await status_msg.delete()
+        # مسح شامل لرسائل النشر الاحترافي لتبقى نظيفة
+        await _safe_delete(context, message.chat_id, user_msg_id)
+        await _safe_delete(context, message.chat_id, watermark_msg_id)
+        await _safe_delete(context, message.chat_id, status_msg.message_id)
 
-        # Cleanup
-        for p in [pro_path]:
-            try:
-                p.unlink()
-            except OSError:
-                pass
+        try:
+            pro_path.unlink()
+        except OSError:
+            pass
 
     except Exception as exc:
         logger.exception("Pro pipeline error")
-        await status_msg.edit_text(f"❌ خطأ في المعالجة:\n{exc}")
+        await status_msg.edit_text("❌ حدث خطأ أثناء معالجة الفيديو الاحترافي.")
+        await asyncio.sleep(4)
+        await _safe_delete(context, message.chat_id, user_msg_id)
+        await _safe_delete(context, message.chat_id, watermark_msg_id)
+        await _safe_delete(context, message.chat_id, status_msg.message_id)
 
 
 async def handle_watermark_reply(
@@ -359,16 +389,17 @@ async def handle_watermark_reply(
     pending = context.bot_data.get(pending_key)
 
     if not pending:
-        # Not waiting for watermark — treat as normal URL message
         await handle_url(update, context)
         return
 
-    # Clear pending state
     del context.bot_data[pending_key]
 
     video_path = Path(pending["video_path"])
     watermark = message.text.strip()
-    original_message = pending["original_message"]
+    
+    # التقاط معرفات رسائل الرابط والـ watermark المكتوب لحذفهما لاحقاً
+    user_msg_id = pending.get("user_msg_id")
+    watermark_msg_id = message.message_id
 
     if not video_path.exists():
         await message.reply_text("❌ الفيديو انتهت صلاحيته. أرسل الرابط من جديد.")
@@ -386,8 +417,9 @@ async def handle_watermark_reply(
         video_path=video_path,
         watermark=watermark,
         status_msg=status_msg,
+        user_msg_id=user_msg_id,
+        watermark_msg_id=watermark_msg_id,
     )
-
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
@@ -395,8 +427,7 @@ async def handle_watermark_reply(
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "👋 *مرحباً!*\n\n"
-        "أرسل لي رابط فيديو من أي منصة مدعومة (يوتيوب، تيك توك، انستغرام…) "
-        "وسأعطيك خيار تحديد جودة الفيديو قبل التحميل.\n\n"
+        "أرسل لي رابط فيديو من أي منصة مدعومة وسأعطيك خيار تحديد جودة الفيديو قبل التحميل.\n\n"
         "📌 الحد الأقصى للحجم: 50 MB",
         parse_mode="Markdown",
     )
@@ -409,11 +440,18 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     url = _extract_url(message.text)
     if not url:
-        await message.reply_text("❌ الرجاء إرسال رابط صحيح يبدأ بـ http/https")
+        # إذا لم يكن الرابط صحيحاً، يرسل تنبيه ثم يمسحه ومعه رسالة المستخدم لتنظيف القناة
+        err_msg = await message.reply_text("❌ الرجاء إرسال رابط صحيح يبدأ بـ http/https")
+        await asyncio.sleep(4)
+        await _safe_delete(context, message.chat_id, message.message_id)
+        await _safe_delete(context, message.chat_id, err_msg.message_id)
         return
 
-    # Show quality selection keyboard
     url_key = _store_url(context, url)
+    
+    # حفظ معرف رسالة رابط المستخدم داخل الذاكرة لربطه بالزر المكبوس لاحقاً
+    context.bot_data[f"user_msg_{url_key}"] = message.message_id
+
     await message.reply_text(
         "🎬 *اختر جودة الفيديو:*\n\n"
         f"🔗 `{url[:60]}{'…' if len(url) > 60 else ''}`",
@@ -430,54 +468,73 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     data = query.data or ""
 
-    # ── Quality selection ──────────────────────────────────────────────────────
     if data.startswith("q|"):
         parts = data.split("|", 2)
         if len(parts) != 3:
             return
         _, quality, url_key = parts
         url = _get_url(context, url_key)
+        
+        # استخراج معرف رسالة المستخدم المرتبطة بهذا التحميل
+        user_msg_id = context.bot_data.pop(f"user_msg_{url_key}", None)
+
         if not url:
             await query.message.edit_text("❌ انتهت صلاحية الطلب. أرسل الرابط من جديد.")
+            await asyncio.sleep(4)
+            await _safe_delete(context, query.message.chat_id, user_msg_id)
+            await _safe_delete(context, query.message.chat_id, query.message.message_id)
             return
 
         quality_labels = {q: l for l, q in QUALITY_OPTIONS}
         quality_label = quality_labels.get(quality, quality)
 
-        # Edit the selection message to show "downloading" status
-        # If quality is 'pro': download at best quality then ask for watermark
         if quality == "pro":
             await query.message.edit_text(
                 f"🚀 *نشر احترافي*\n"
-                f"⏳ جاري تحميل الفيديو...",
+                f"⏳ جاري تحميل الفيديو الأصل...",
                 parse_mode="Markdown",
             )
-            # Download at best quality via API
             timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                job_id = await _post_download(session, url, "best")
-                for _ in range(MAX_POLL_ATTEMPTS):
-                    job = await _poll_result(session, job_id)
-                    if job.get("status") == "done":
-                        break
-                    if job.get("status") == "error":
-                        await query.message.edit_text(f"❌ فشل التحميل:\n{job.get('error', '')}")
+                try:
+                    job_id = await _post_download(session, url, "best")
+                    for _ in range(MAX_POLL_ATTEMPTS):
+                        job = await _poll_result(session, job_id)
+                        if job.get("status") == "done":
+                            break
+                        if job.get("status") == "error":
+                            await query.message.edit_text("❌ فشل تحميل الفيديو الرئيسي.")
+                            await asyncio.sleep(4)
+                            await _safe_delete(context, query.message.chat_id, user_msg_id)
+                            await _safe_delete(context, query.message.chat_id, query.message.message_id)
+                            return
+                        await asyncio.sleep(POLL_INTERVAL)
+                    else:
+                        await query.message.edit_text("⌛ انتهت مهلة التحميل.")
+                        await asyncio.sleep(4)
+                        await _safe_delete(context, query.message.chat_id, user_msg_id)
+                        await _safe_delete(context, query.message.chat_id, query.message.message_id)
                         return
-                    await asyncio.sleep(POLL_INTERVAL)
-                else:
-                    await query.message.edit_text("⌛ انتهت مهلة التحميل.")
+                except Exception:
+                    await query.message.edit_text("❌ خطأ في السيرفر الخلفي.")
+                    await asyncio.sleep(4)
+                    await _safe_delete(context, query.message.chat_id, user_msg_id)
+                    await _safe_delete(context, query.message.chat_id, query.message.message_id)
                     return
 
             video_path = Path(job.get("file", ""))
             if not video_path.exists():
                 await query.message.edit_text("❌ الملف غير موجود.")
+                await asyncio.sleep(4)
+                await _safe_delete(context, query.message.chat_id, user_msg_id)
+                await _safe_delete(context, query.message.chat_id, query.message.message_id)
                 return
 
-            # Store video path and wait for watermark reply
             user_id = query.from_user.id if query.from_user else 0
             context.bot_data[f"pro_pending_{user_id}"] = {
                 "video_path": str(video_path),
                 "original_message": query.message,
+                "user_msg_id": user_msg_id,
             }
             await query.message.edit_text(
                 "✅ تم التحميل!\n\n"
@@ -499,14 +556,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             url=url,
             quality=quality,
             status_msg=query.message,
+            user_msg_id=user_msg_id,
         )
 
-    # ── Re-download ────────────────────────────────────────────────────────────
     elif data.startswith("rd|"):
         rd_key = data.split("|", 1)[1]
         url = _get_url(context, rd_key)
         if not url:
-            await query.message.reply_text("❌ انتهت صلاحية الطلب. أرسل الرابط من جديد.")
+            await query.message.reply_text("❌ انتهت صلاحية الطلب.")
             return
         url_key = _store_url(context, url)
         await query.message.reply_text(
@@ -517,7 +574,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle exceptions gracefully, especially when a user blocks the bot."""
     if isinstance(context.error, Forbidden):
         logger.warning("⚠️ Bot was blocked by the user or lacks permissions.")
         return
@@ -526,12 +582,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-
 def main() -> None:
     if not BOT_TOKEN:
-        raise RuntimeError(
-            "❌ TELEGRAM_BOT_TOKEN مفقود – ضعه في ملف .env"
-        )
+        raise RuntimeError("❌ TELEGRAM_BOT_TOKEN مفقود – ضعه في ملف .env")
 
     logging.basicConfig(
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -540,7 +593,6 @@ def main() -> None:
 
     from telegram.request import HTTPXRequest
 
-    # Configure custom HTTP client timeouts globally for all requests
     request_config = HTTPXRequest(
         connect_timeout=60.0,
         read_timeout=60.0,
@@ -549,11 +601,7 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).request(request_config).build()
     app.add_handler(CommandHandler("start", cmd_start))
-    # Pro watermark handler must come BEFORE general URL handler
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        handle_watermark_reply,
-    ))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_watermark_reply))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(error_handler)
 
