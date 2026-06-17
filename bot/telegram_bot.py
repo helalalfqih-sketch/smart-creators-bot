@@ -1,25 +1,22 @@
 """
-Telegram Bot (Polling mode) - Fully Automated High-Quality Downloader.
+Telegram Bot (Polling mode) - 100% Automated Buttonless Downloader.
 
 Flow:
   1. User sends a video URL.
-  2. Bot automatically extracts URL and starts downloading at the platform's highest quality (8K/4K/Best).
+  2. Bot automatically starts downloading at the platform's highest quality (Best).
   3. Bot polls /result/{job_id} every 3 s, updating a temporary status message.
-  4. Once done, bot sends the final file to the channel permanently.
-  5. Bot automatically deletes the user's link message and the status message to keep the feed pristine.
+  4. Once done, bot sends the final file permanently.
+  5. Bot automatically deletes the user's link and the status message (100% Clean feed).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
 import aiohttp
 from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     Message,
     Update,
 )
@@ -28,7 +25,6 @@ from telegram.error import Forbidden
 
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -46,18 +42,6 @@ logger = logging.getLogger("bot")
 POLL_INTERVAL = 3          # seconds between /result polls
 MAX_POLL_ATTEMPTS = 100    # 300 s total before giving up
 
-# Quality options: kept for labels mapping
-QUALITY_OPTIONS = [
-    ("🎧 صوت MP3",   "audio"),
-    ("📱 144p",  "144"),
-    ("📺 360p",  "360"),
-    ("🎞 480p",  "480"),
-    ("🎬 720p",  "720"),
-    ("🖥 1080p", "1080"),
-    ("⚡ أفضل جودة", "best"),
-    ("✨ تحسين الجودة", "enhance"),
-    ("🚀 نشر احترافي", "pro"),
-]
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -77,18 +61,6 @@ def _progress_bar(pct: float, width: int = 10) -> str:
     filled = int(pct / 100 * width)
     bar = "█" * filled + "░" * (width - filled)
     return f"[{bar}] {pct:.0f}%"
-
-
-def _store_url(context: ContextTypes.DEFAULT_TYPE, url: str) -> str:
-    """Store URL in bot_data with a short key and return the key."""
-    key = uuid.uuid4().hex[:12]   # 12 chars – well within 64-byte limit
-    context.bot_data[key] = url
-    return key
-
-
-def _get_url(context: ContextTypes.DEFAULT_TYPE, key: str) -> str | None:
-    """Retrieve a stored URL by key."""
-    return context.bot_data.get(key)
 
 
 async def _safe_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int | None) -> None:
@@ -126,21 +98,17 @@ async def _poll_result(session: aiohttp.ClientSession, job_id: str) -> dict:
 
 async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                         url: str, quality: str, status_msg: Message, user_msg_id: int | None = None) -> None:
-    """Shared download logic used by both direct URL and quality button handlers."""
+    """Shared download logic with no buttons attached."""
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
-
-    quality_labels = {q: l for l, q in QUALITY_OPTIONS}
-    quality_label = quality_labels.get(quality, "جودة المنصة الأصلية")
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             # Step 1 – start job
             job_id = await _post_download(session, url, quality)
             await status_msg.edit_text(
-                f"✅ تم استلام الطلب\n"
-                f"📊 الجودة: *{quality_label}*\n"
+                f"✅ تم استلام الطلب بنجاح\n"
                 f"🆔 `{job_id[:8]}…`\n\n"
-                f"⏳ في انتظار بدء التحميل...",
+                f"⏳ في انتظار بدء التحميل تلقائياً...",
                 parse_mode="Markdown",
             )
 
@@ -222,14 +190,9 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
             )
 
             if is_audio:
-                await status_msg.edit_text("📤 جاري إرسال الصوت إليك...")
+                await status_msg.edit_text("📤 جاري إرسال الملف الصوتي...")
             else:
-                await status_msg.edit_text("📤 جاري إرسال الفيديو إليك...")
-
-            redownload_key = _store_url(context, url)
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 تحميل مجدداً", callback_data=f"rd|{redownload_key}")]]
-            )
+                await status_msg.edit_text("📤 جاري إرسال الفيديو المكتمل...")
 
             thumbnail_file = None
             try:
@@ -244,7 +207,6 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                             title="مقطع صوتي",
                             performer="بوت التحميل",
                             caption=f"✅ تم التحميل بنجاح\n🔗 @smart_creators_bot",
-                            reply_markup=keyboard,
                             write_timeout=300,
                             read_timeout=300,
                             connect_timeout=300,
@@ -257,7 +219,6 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                             width=width if width > 0 else None,
                             height=height if height > 0 else None,
                             caption=f"✅ تم التحميل بالجودة الأصلية للمنصة 💎\n🔗 @smart_creators_bot",
-                            reply_markup=keyboard,
                             supports_streaming=True,
                             write_timeout=300,
                             read_timeout=300,
@@ -267,7 +228,7 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                 if thumbnail_file:
                     thumbnail_file.close()
 
-            # التخلص النهائي من الرسائل المؤقتة ورابط المستخدم لتصفية القناة تماماً
+            # التخلص النهائي من الرسائل المؤقتة ورابط المستخدم لتصفية القناة تماماً (بدون ترك أي أثر)
             await _safe_delete(context, message.chat_id, user_msg_id)
             await _safe_delete(context, message.chat_id, status_msg.message_id)
 
@@ -285,117 +246,12 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
         await _safe_delete(context, message.chat_id, status_msg.message_id)
 
 
-# ── Pro Pipeline ──────────────────────────────────────────────────────────────
-
-async def _run_pro_pipeline(
-    message: Message,
-    context: ContextTypes.DEFAULT_TYPE,
-    video_path: Path,
-    watermark: str,
-    status_msg: Message,
-    user_msg_id: int | None = None,
-    watermark_msg_id: int | None = None,
-) -> None:
-    """تشغيل البايبلاين الاحترافي: تفريغ صوتي + كابشن + watermark."""
-    from core.captions import make_pro_video
-
-    async def on_progress(text: str, pct: float) -> None:
-        bar = _progress_bar(pct)
-        try:
-            await status_msg.edit_text(f"{text}\n{bar}")
-        except Exception:
-            pass
-
-    try:
-        pro_path = await make_pro_video(
-            video_path=video_path,
-            watermark=watermark,
-            on_progress=on_progress,
-        )
-
-        await status_msg.edit_text("📤 جاري إرسال الفيديو الاحترافي... 🚀")
-
-        with open(pro_path, "rb") as f:
-            await message.reply_video(
-                video=f,
-                caption=f"🚀 فيديو احترافي | {watermark}\n🔗 @smart_creators_bot",
-                supports_streaming=True,
-                write_timeout=300,
-                read_timeout=300,
-                connect_timeout=60,
-            )
-
-        # مسح شامل لرسائل النشر الاحترافي لتبقى نظيفة
-        await _safe_delete(context, message.chat_id, user_msg_id)
-        await _safe_delete(context, message.chat_id, watermark_msg_id)
-        await _safe_delete(context, message.chat_id, status_msg.message_id)
-
-        try:
-            pro_path.unlink()
-        except OSError:
-            pass
-
-    except Exception as exc:
-        logger.exception("Pro pipeline error")
-        await status_msg.edit_text("❌ حدث خطأ أثناء معالجة الفيديو الاحترافي.")
-        await asyncio.sleep(4)
-        await _safe_delete(context, message.chat_id, user_msg_id)
-        await _safe_delete(context, message.chat_id, watermark_msg_id)
-        await _safe_delete(context, message.chat_id, status_msg.message_id)
-
-
-async def handle_watermark_reply(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """يستقبل اسم الواترمارك من المستخدم ويبدأ البايبلاين."""
-    message = update.effective_message
-    if not message or not message.text:
-        return
-
-    user_id = update.effective_user.id if update.effective_user else 0
-    pending_key = f"pro_pending_{user_id}"
-    pending = context.bot_data.get(pending_key)
-
-    if not pending:
-        await handle_url(update, context)
-        return
-
-    del context.bot_data[pending_key]
-
-    video_path = Path(pending["video_path"])
-    watermark = message.text.strip()
-    
-    user_msg_id = pending.get("user_msg_id")
-    watermark_msg_id = message.message_id
-
-    if not video_path.exists():
-        await message.reply_text("❌ الفيديو انتهت صلاحيته. أرسل الرابط من جديد.")
-        return
-
-    status_msg = await message.reply_text(
-        f"✅ سيتم إضافة \"*{watermark}*\" كفاصل 🚀\n"
-        f"🎤 جاري تفريغ الكلام...",
-        parse_mode="Markdown",
-    )
-
-    await _run_pro_pipeline(
-        message=message,
-        context=context,
-        video_path=video_path,
-        watermark=watermark,
-        status_msg=status_msg,
-        user_msg_id=user_msg_id,
-        watermark_msg_id=watermark_msg_id,
-    )
-
-
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "👋 *مرحباً!*\n\n"
-        "أرسل لي رابط فيديو من أي منصة مدعومة وسأقوم بتحميله تلقائياً بأعلى جودة متاحة للمنشور الأصل (4K/8K/Best).\n\n"
-        "📌 الحد الأقصى للحجم: 50 MB",
+        "أرسل لي رابط فيديو مباشرة من أي منصة وسأقوم بتحميله فوراً بأعلى جودة أصلية متاحة للمنشور (4K/8K/Best).",
         parse_mode="Markdown",
     )
 
@@ -407,59 +263,27 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     url = _extract_url(message.text)
     if not url:
-        # إذا لم يكن الرابط صحيحاً، يرسل تنبيه ثم يمسحه ومعه رسالة المستخدم لتنظيف القناة
         err_msg = await message.reply_text("❌ الرجاء إرسال رابط صحيح يبدأ بـ http/https")
         await asyncio.sleep(4)
         await _safe_delete(context, message.chat_id, message.message_id)
         await _safe_delete(context, message.chat_id, err_msg.message_id)
         return
 
-    # 1. إرسال رسالة حالة مؤقتة تفيد بفحص الرابط والتحميل بالجودة الأصلية للمنصة
+    # 1. إرسال رسالة حالة مؤقتة
     status_msg = await message.reply_text(
-        "⏳ *جاري فحص الرابط والتحميل بالجودة الأصلية للمنصة تلقائياً...*",
+        "⏳ *جاري فحص الرابط وبدء التحميل التلقائي بالجودة الكاملة...*",
         parse_mode="Markdown"
     )
 
-    # 2. استدعاء دالة التحميل وتمرير "best" ليتكيف السيرفر مع جودة الفيديو الأصلية (8K, 4K, 1080p...)
+    # 2. التحميل المباشر بجودة "best"
     await _run_download(
         message=message,
         context=context,
         url=url,
-        quality="best",  # <--- تضمن النزول التلقائي والذكي حسب جودة الفيديو الأصلية
+        quality="best",
         status_msg=status_msg,
-        user_msg_id=message.message_id, # تمرير رقم رسالة المستخدم لحذفها لاحقاً وتصفية القناة
+        user_msg_id=message.message_id,
     )
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-
-    data = query.data or ""
-
-    if data.startswith("rd|"):
-        rd_key = data.split("|", 1)[1]
-        url = _get_url(context, rd_key)
-        if not url:
-            await query.message.reply_text("❌ انتهت صلاحية الطلب.")
-            return
-        
-        # عند إعادة التحميل يتم التنزيل المباشر بأعلى جودة أصلية تلقائياً دون إظهار أزرار
-        status_msg = await query.message.reply_text(
-            "⏳ *جاري إعادة تحميل المقطع بالجودة الأصلية للمنصة تلقائياً...*",
-            parse_mode="Markdown"
-        )
-        
-        await _run_download(
-            message=query.message,
-            context=context,
-            url=url,
-            quality="best",
-            status_msg=status_msg,
-            user_msg_id=None,
-        )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -490,8 +314,7 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).request(request_config).build()
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_watermark_reply))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_error_handler(error_handler)
 
     logger.info("🤖 Bot polling started | API: %s", DOWNLOAD_API_URL)
