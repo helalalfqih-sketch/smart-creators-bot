@@ -1,13 +1,12 @@
 """
-Telegram Bot (Polling mode).
+Telegram Bot (Polling mode) - Fully Automated High-Quality Downloader.
 
 Flow:
-  1. User sends a video URL
-  2. Bot shows quality selection buttons
-  3. User picks a quality → Bot POSTs to FastAPI /download with quality → gets job_id
-  4. Bot polls /result/{job_id} every 3 s, updating a status message
-  5. Once done, bot reads the local file and sends it as a video
-  6. On error, bot shows a clean temporary error message, then deletes everything to keep the channel clean.
+  1. User sends a video URL.
+  2. Bot automatically extracts URL and starts downloading at the platform's highest quality (8K/4K/Best).
+  3. Bot polls /result/{job_id} every 3 s, updating a temporary status message.
+  4. Once done, bot sends the final file to the channel permanently.
+  5. Bot automatically deletes the user's link message and the status message to keep the feed pristine.
 """
 from __future__ import annotations
 
@@ -47,7 +46,7 @@ logger = logging.getLogger("bot")
 POLL_INTERVAL = 3          # seconds between /result polls
 MAX_POLL_ATTEMPTS = 100    # 300 s total before giving up
 
-# Quality options: (label, yt-dlp height value sent to API)
+# Quality options: kept for labels mapping
 QUALITY_OPTIONS = [
     ("🎧 صوت MP3",   "audio"),
     ("📱 144p",  "144"),
@@ -78,22 +77,6 @@ def _progress_bar(pct: float, width: int = 10) -> str:
     filled = int(pct / 100 * width)
     bar = "█" * filled + "░" * (width - filled)
     return f"[{bar}] {pct:.0f}%"
-
-
-def _quality_keyboard(url_key: str) -> InlineKeyboardMarkup:
-    """Build quality selection keyboard. url_key is a short UUID stored in bot_data."""
-    buttons = []
-    row = []
-    for label, quality in QUALITY_OPTIONS:
-        row.append(
-            InlineKeyboardButton(label, callback_data=f"q|{quality}|{url_key}")
-        )
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    return InlineKeyboardMarkup(buttons)
 
 
 def _store_url(context: ContextTypes.DEFAULT_TYPE, url: str) -> str:
@@ -147,7 +130,7 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
 
     quality_labels = {q: l for l, q in QUALITY_OPTIONS}
-    quality_label = quality_labels.get(quality, quality)
+    quality_label = quality_labels.get(quality, "جودة المنصة الأصلية")
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -238,19 +221,8 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                     and _ext not in _maybe_audio_exts)
             )
 
-            if quality == "enhance" and not is_audio:
-                from core.worker import enhance_video
-                await status_msg.edit_text(
-                    "✨ *جاري تحسين الجودة بـ FFmpeg...*\n"
-                    "هذا يستغرق لحظة إضافية ⏳",
-                    parse_mode="Markdown",
-                )
-                file_path = await enhance_video(file_path)
-
             if is_audio:
                 await status_msg.edit_text("📤 جاري إرسال الصوت إليك...")
-            elif quality == "enhance":
-                await status_msg.edit_text("📤 جاري إرسال الفيديو المحسّن إليك... ✨")
             else:
                 await status_msg.edit_text("📤 جاري إرسال الفيديو إليك...")
 
@@ -284,11 +256,7 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                             duration=duration if duration > 0 else None,
                             width=width if width > 0 else None,
                             height=height if height > 0 else None,
-                            caption=(
-                                f"✨ تم التحسين بنجاح | {quality_label}\n🔗 @smart_creators_bot"
-                                if quality == "enhance" else
-                                f"✅ تم التحميل بنجاح | {quality_label}\n🔗 @smart_creators_bot"
-                            ),
+                            caption=f"✅ تم التحميل بالجودة الأصلية للمنصة 💎\n🔗 @smart_creators_bot",
                             reply_markup=keyboard,
                             supports_streaming=True,
                             write_timeout=300,
@@ -397,7 +365,6 @@ async def handle_watermark_reply(
     video_path = Path(pending["video_path"])
     watermark = message.text.strip()
     
-    # التقاط معرفات رسائل الرابط والـ watermark المكتوب لحذفهما لاحقاً
     user_msg_id = pending.get("user_msg_id")
     watermark_msg_id = message.message_id
 
@@ -427,7 +394,7 @@ async def handle_watermark_reply(
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "👋 *مرحباً!*\n\n"
-        "أرسل لي رابط فيديو من أي منصة مدعومة وسأعطيك خيار تحديد جودة الفيديو قبل التحميل.\n\n"
+        "أرسل لي رابط فيديو من أي منصة مدعومة وسأقوم بتحميله تلقائياً بأعلى جودة متاحة للمنشور الأصل (4K/8K/Best).\n\n"
         "📌 الحد الأقصى للحجم: 50 MB",
         parse_mode="Markdown",
     )
@@ -447,16 +414,20 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _safe_delete(context, message.chat_id, err_msg.message_id)
         return
 
-    url_key = _store_url(context, url)
-    
-    # حفظ معرف رسالة رابط المستخدم داخل الذاكرة لربطه بالزر المكبوس لاحقاً
-    context.bot_data[f"user_msg_{url_key}"] = message.message_id
+    # 1. إرسال رسالة حالة مؤقتة تفيد بفحص الرابط والتحميل بالجودة الأصلية للمنصة
+    status_msg = await message.reply_text(
+        "⏳ *جاري فحص الرابط والتحميل بالجودة الأصلية للمنصة تلقائياً...*",
+        parse_mode="Markdown"
+    )
 
-    await message.reply_text(
-        "🎬 *اختر جودة الفيديو:*\n\n"
-        f"🔗 `{url[:60]}{'…' if len(url) > 60 else ''}`",
-        parse_mode="Markdown",
-        reply_markup=_quality_keyboard(url_key),
+    # 2. استدعاء دالة التحميل وتمرير "best" ليتكيف السيرفر مع جودة الفيديو الأصلية (8K, 4K, 1080p...)
+    await _run_download(
+        message=message,
+        context=context,
+        url=url,
+        quality="best",  # <--- تضمن النزول التلقائي والذكي حسب جودة الفيديو الأصلية
+        status_msg=status_msg,
+        user_msg_id=message.message_id, # تمرير رقم رسالة المستخدم لحذفها لاحقاً وتصفية القناة
     )
 
 
@@ -468,108 +439,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     data = query.data or ""
 
-    if data.startswith("q|"):
-        parts = data.split("|", 2)
-        if len(parts) != 3:
-            return
-        _, quality, url_key = parts
-        url = _get_url(context, url_key)
-        
-        # استخراج معرف رسالة المستخدم المرتبطة بهذا التحميل
-        user_msg_id = context.bot_data.pop(f"user_msg_{url_key}", None)
-
-        if not url:
-            await query.message.edit_text("❌ انتهت صلاحية الطلب. أرسل الرابط من جديد.")
-            await asyncio.sleep(4)
-            await _safe_delete(context, query.message.chat_id, user_msg_id)
-            await _safe_delete(context, query.message.chat_id, query.message.message_id)
-            return
-
-        quality_labels = {q: l for l, q in QUALITY_OPTIONS}
-        quality_label = quality_labels.get(quality, quality)
-
-        if quality == "pro":
-            await query.message.edit_text(
-                f"🚀 *نشر احترافي*\n"
-                f"⏳ جاري تحميل الفيديو الأصل...",
-                parse_mode="Markdown",
-            )
-            timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                try:
-                    job_id = await _post_download(session, url, "best")
-                    for _ in range(MAX_POLL_ATTEMPTS):
-                        job = await _poll_result(session, job_id)
-                        if job.get("status") == "done":
-                            break
-                        if job.get("status") == "error":
-                            await query.message.edit_text("❌ فشل تحميل الفيديو الرئيسي.")
-                            await asyncio.sleep(4)
-                            await _safe_delete(context, query.message.chat_id, user_msg_id)
-                            await _safe_delete(context, query.message.chat_id, query.message.message_id)
-                            return
-                        await asyncio.sleep(POLL_INTERVAL)
-                    else:
-                        await query.message.edit_text("⌛ انتهت مهلة التحميل.")
-                        await asyncio.sleep(4)
-                        await _safe_delete(context, query.message.chat_id, user_msg_id)
-                        await _safe_delete(context, query.message.chat_id, query.message.message_id)
-                        return
-                except Exception:
-                    await query.message.edit_text("❌ خطأ في السيرفر الخلفي.")
-                    await asyncio.sleep(4)
-                    await _safe_delete(context, query.message.chat_id, user_msg_id)
-                    await _safe_delete(context, query.message.chat_id, query.message.message_id)
-                    return
-
-            video_path = Path(job.get("file", ""))
-            if not video_path.exists():
-                await query.message.edit_text("❌ الملف غير موجود.")
-                await asyncio.sleep(4)
-                await _safe_delete(context, query.message.chat_id, user_msg_id)
-                await _safe_delete(context, query.message.chat_id, query.message.message_id)
-                return
-
-            user_id = query.from_user.id if query.from_user else 0
-            context.bot_data[f"pro_pending_{user_id}"] = {
-                "video_path": str(video_path),
-                "original_message": query.message,
-                "user_msg_id": user_msg_id,
-            }
-            await query.message.edit_text(
-                "✅ تم التحميل!\n\n"
-                "✍️ *أدخل اسم الفاصل (Watermark)*\n"
-                "مثال: `@حلال_الفقيه`",
-                parse_mode="Markdown",
-            )
-            return
-
-        await query.message.edit_text(
-            f"🚀 جاري بدء التحميل...\n"
-            f"📊 الجودة المختارة: *{quality_label}*",
-            parse_mode="Markdown",
-        )
-
-        await _run_download(
-            message=query.message,
-            context=context,
-            url=url,
-            quality=quality,
-            status_msg=query.message,
-            user_msg_id=user_msg_id,
-        )
-
-    elif data.startswith("rd|"):
+    if data.startswith("rd|"):
         rd_key = data.split("|", 1)[1]
         url = _get_url(context, rd_key)
         if not url:
             await query.message.reply_text("❌ انتهت صلاحية الطلب.")
             return
-        url_key = _store_url(context, url)
-        await query.message.reply_text(
-            "🎬 *اختر جودة الفيديو للتحميل مجدداً:*",
-            parse_mode="Markdown",
-            reply_markup=_quality_keyboard(url_key),
+        
+        # عند إعادة التحميل يتم التنزيل المباشر بأعلى جودة أصلية تلقائياً دون إظهار أزرار
+        status_msg = await query.message.reply_text(
+            "⏳ *جاري إعادة تحميل المقطع بالجودة الأصلية للمنصة تلقائياً...*",
+            parse_mode="Markdown"
+        )
+        
+        await _run_download(
+            message=query.message,
+            context=context,
+            url=url,
+            quality="best",
+            status_msg=status_msg,
+            user_msg_id=None,
         )
 
 
