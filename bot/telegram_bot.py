@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re  # تم إضافة مكتبة التعبيرات النمطية لتنظيف الروابط
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -36,14 +37,20 @@ MAX_POLL_ATTEMPTS = 100
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 def _extract_url(text: str) -> str | None:
-    for word in text.split():
-        if word.startswith(("http://", "https://")):
-            try:
-                p = urlparse(word)
-                if p.netloc:
-                    return word.strip()
-            except Exception:
-                pass
+    """استخراج رابط الـ URL الحقيقي بدقة وتنظيفه من النصوص والرموز الصينية الملتصقة به"""
+    if not text:
+        return None
+        
+    # نمط RegEx للبحث عن أي رابط يبدأ بـ http أو https وينتهي بنهاية الرابط الحقيقي فقط
+    url_pattern = r'(https?://[^\s，]+)'
+    match = re.search(url_pattern, text)
+    
+    if match:
+        url = match.group(1).strip()
+        # تنظيف علامات الترقيم والرموز الزائدة التي قد تلتصق بنهاية الرابط
+        url = url.rstrip('.:,;?)"\'/،')
+        return url
+        
     return None
 
 
@@ -117,7 +124,7 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                         if "Unsupported URL" in err and "/photo/" in err:
                             await status_msg.edit_text("❌ هذا منشور صور وليس فيديو.\n⚠️ تنظيف تلقائي...")
                         else:
-                            await status_msg.edit_text("❌ فشل التحميل: الرابط غير مدعوم.\n⚠️ تنظيف تلقائي...")
+                            await status_msg.edit_text("❌ فشل التحميل: الرابط غير مدعوم أو غير صحيح.\n⚠️ تنظيف تلقائي...")
                     except Exception:
                         pass
                     
@@ -162,20 +169,18 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
             thumbnail_path_str = job.get("thumbnail")
             thumbnail_path = Path(thumbnail_path_str) if thumbnail_path_str else None
 
-            # 🛠️ [التعديل الجوهري لحل مشكلة الصوت] 🛠️
+            # تفادي مشكلة الصوت والفيديو
             _pure_audio_exts = {".mp3", ".wav", ".ogg", ".flac"}
             _maybe_audio_exts = {".m4a", ".aac", ".opus"}
             _video_exts = {".mp4", ".mkv", ".webm", ".mov", ".3gp", ".avi"}
             _ext = file_path.suffix.lower()
             
-            # تحديد نوع الملف بناءً على الامتداد الفعلي وليس الأبعاد فقط
             is_audio = (
                 quality == "audio"
                 or _ext in _pure_audio_exts
                 or (_ext in _maybe_audio_exts and width == 0 and height == 0)
             )
             
-            # إذا كان الامتداد للفيديو، نلغي خيار الصوت تماماً حمايةً للملف
             if _ext in _video_exts:
                 is_audio = False
 
@@ -221,7 +226,7 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                 if thumbnail_file:
                     thumbnail_file.close()
 
-            # حذف نهائي للمخلفات
+            # حذف نهائي للمخلفات للوصول لقناة نظيفة 100%
             await _safe_delete(context, message.chat_id, user_msg_id)
             await _safe_delete(context, message.chat_id, status_msg.message_id)
 
@@ -263,7 +268,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         parse_mode="Markdown"
     )
 
-    # معالجة خلفية متوازية لأكثر من 20 رابط بالثانية
+    # معالجة خلفية متوازية تسمح بـ 20 رابط أو أكثر في نفس اللحظة
     asyncio.create_task(
         _run_download(
             message=message,
@@ -313,7 +318,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_error_handler(error_handler)
 
-    logger.info("🤖 Bot polling started | Parallel mode ON")
+    logger.info("🤖 Bot polling started | Full Parallel & RegEx Cleaning Mode ON")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
