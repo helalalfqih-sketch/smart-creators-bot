@@ -1,13 +1,3 @@
-"""
-Telegram Bot (Polling mode) - 100% Automated Buttonless Downloader.
-
-Flow:
-  1. User sends a video URL.
-  2. Bot automatically starts downloading at the platform's highest quality (Best).
-  3. Bot polls /result/{job_id} every 3 s, updating a temporary status message.
-  4. Once done, bot sends the final file permanently.
-  5. Bot automatically deletes the user's link and the status message (100% Clean feed).
-"""
 from __future__ import annotations
 
 import asyncio
@@ -39,8 +29,8 @@ from core.config import (
 
 logger = logging.getLogger("bot")
 
-POLL_INTERVAL = 3          # seconds between /result polls
-MAX_POLL_ATTEMPTS = 100    # 300 s total before giving up
+POLL_INTERVAL = 3          
+MAX_POLL_ATTEMPTS = 100    
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -64,7 +54,6 @@ def _progress_bar(pct: float, width: int = 10) -> str:
 
 
 async def _safe_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int | None) -> None:
-    """Safely delete a message without crashing if it doesn't exist or if permissions lack."""
     if message_id:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -75,7 +64,6 @@ async def _safe_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message
 # ── API helpers ───────────────────────────────────────────────────────────────
 
 async def _post_download(session: aiohttp.ClientSession, url: str, quality: str = "best") -> str:
-    """Start a download job and return job_id."""
     endpoint = f"{DOWNLOAD_API_URL.rstrip('/')}/download"
     async with session.post(endpoint, params={"url": url, "quality": quality}) as resp:
         if resp.status != 200:
@@ -86,7 +74,6 @@ async def _post_download(session: aiohttp.ClientSession, url: str, quality: str 
 
 
 async def _poll_result(session: aiohttp.ClientSession, job_id: str) -> dict:
-    """Fetch current job state."""
     endpoint = f"{DOWNLOAD_API_URL.rstrip('/')}/result/{job_id}"
     async with session.get(endpoint) as resp:
         if resp.status != 200:
@@ -98,21 +85,23 @@ async def _poll_result(session: aiohttp.ClientSession, job_id: str) -> dict:
 
 async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                         url: str, quality: str, status_msg: Message, user_msg_id: int | None = None) -> None:
-    """Shared download logic with no buttons attached."""
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Step 1 – start job
+            # الخطوة 1 – بدء المهمة
             job_id = await _post_download(session, url, quality)
-            await status_msg.edit_text(
-                f"✅ تم استلام الطلب بنجاح\n"
-                f"🆔 `{job_id[:8]}…`\n\n"
-                f"⏳ في انتظار بدء التحميل تلقائياً...",
-                parse_mode="Markdown",
-            )
+            try:
+                await status_msg.edit_text(
+                    f"✅ تم استلام الطلب بنجاح\n"
+                    f"🆔 `{job_id[:8]}…`\n\n"
+                    f"⏳ في انتظار بدء التحميل تلقائياً...",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
-            # Step 2 – poll until done
+            # الخطوة 2 – الفحص الدوري للحالة
             for attempt in range(MAX_POLL_ATTEMPTS):
                 job = await _poll_result(session, job_id)
                 status = job.get("status", "")
@@ -124,49 +113,44 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
 
                 if status == "error":
                     err = job.get("error", "خطأ غير معروف")
-                    if "Unsupported URL" in err and "/photo/" in err:
-                        await status_msg.edit_text(
-                            "❌ هذا منشور صور وليس فيديو.\n"
-                            "⚠️ سيتم تنظيف القناة تلقائياً..."
-                        )
-                    else:
-                        await status_msg.edit_text(
-                            "❌ فشل التحميل: الرابط غير مدعوم أو غير صحيح.\n"
-                            "⚠️ سيتم تنظيف القناة تلقائياً..."
-                        )
+                    try:
+                        if "Unsupported URL" in err and "/photo/" in err:
+                            await status_msg.edit_text("❌ هذا منشور صور وليس فيديو.\n⚠️ تنظيف تلقائي...")
+                        else:
+                            await status_msg.edit_text("❌ فشل التحميل: الرابط غير مدعوم.\n⚠️ تنظيف تلقائي...")
+                    except Exception:
+                        pass
                     
                     await asyncio.sleep(4)
                     await _safe_delete(context, message.chat_id, user_msg_id)
                     await _safe_delete(context, message.chat_id, status_msg.message_id)
                     return
 
-                # Update progress message every poll
                 bar = _progress_bar(pct)
                 try:
-                    await status_msg.edit_text(
-                        f"{text}\n{bar}",
-                        parse_mode=None,
-                    )
-                    await context.bot.send_chat_action(
-                        chat_id=message.chat_id,
-                        action=ChatAction.UPLOAD_VIDEO,
-                    )
+                    await status_msg.edit_text(f"{text}\n{bar}", parse_mode=None)
+                    await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
                 except Exception:
-                    pass  # ignore if message unchanged
+                    pass
 
                 await asyncio.sleep(POLL_INTERVAL)
-
             else:
-                await status_msg.edit_text("⌛ انتهت مهلة الانتظار. سيتم حذف هذا التنبيه...")
+                try:
+                    await status_msg.edit_text("⌛ انتهت مهلة الانتظار. سيتم الحذف...")
+                except Exception:
+                    pass
                 await asyncio.sleep(4)
                 await _safe_delete(context, message.chat_id, user_msg_id)
                 await _safe_delete(context, message.chat_id, status_msg.message_id)
                 return
 
-            # Step 3 – send video
+            # الخطوة 3 – إرسال الملف
             file_path = Path(job.get("file", ""))
             if not file_path.exists():
-                await status_msg.edit_text("❌ الملف غير موجود على السيرفر.")
+                try:
+                    await status_msg.edit_text("❌ الملف غير موجود على السيرفر.")
+                except Exception:
+                    pass
                 await asyncio.sleep(4)
                 await _safe_delete(context, message.chat_id, user_msg_id)
                 await _safe_delete(context, message.chat_id, status_msg.message_id)
@@ -178,21 +162,30 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
             thumbnail_path_str = job.get("thumbnail")
             thumbnail_path = Path(thumbnail_path_str) if thumbnail_path_str else None
 
+            # 🛠️ [التعديل الجوهري لحل مشكلة الصوت] 🛠️
             _pure_audio_exts = {".mp3", ".wav", ".ogg", ".flac"}
             _maybe_audio_exts = {".m4a", ".aac", ".opus"}
+            _video_exts = {".mp4", ".mkv", ".webm", ".mov", ".3gp", ".avi"}
             _ext = file_path.suffix.lower()
+            
+            # تحديد نوع الملف بناءً على الامتداد الفعلي وليس الأبعاد فقط
             is_audio = (
                 quality == "audio"
                 or _ext in _pure_audio_exts
                 or (_ext in _maybe_audio_exts and width == 0 and height == 0)
-                or (width == 0 and height == 0 and quality != "audio" and _ext not in _pure_audio_exts
-                    and _ext not in _maybe_audio_exts)
             )
+            
+            # إذا كان الامتداد للفيديو، نلغي خيار الصوت تماماً حمايةً للملف
+            if _ext in _video_exts:
+                is_audio = False
 
-            if is_audio:
-                await status_msg.edit_text("📤 جاري إرسال الملف الصوتي...")
-            else:
-                await status_msg.edit_text("📤 جاري إرسال الفيديو المكتمل...")
+            try:
+                if is_audio:
+                    await status_msg.edit_text("📤 جاري إرسال الملف الصوتي...")
+                else:
+                    await status_msg.edit_text("📤 جاري إرسال الفيديو المكتمل...")
+            except Exception:
+                pass
 
             thumbnail_file = None
             try:
@@ -228,19 +221,16 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
                 if thumbnail_file:
                     thumbnail_file.close()
 
-            # التخلص النهائي من الرسائل المؤقتة ورابط المستخدم لتصفية القناة تماماً (بدون ترك أي أثر)
+            # حذف نهائي للمخلفات
             await _safe_delete(context, message.chat_id, user_msg_id)
             await _safe_delete(context, message.chat_id, status_msg.message_id)
 
-    except aiohttp.ClientError as exc:
-        logger.exception("Network error")
-        await status_msg.edit_text("❌ خطأ في الاتصال بالسيرفر الخلفي.")
-        await asyncio.sleep(4)
-        await _safe_delete(context, message.chat_id, user_msg_id)
-        await _safe_delete(context, message.chat_id, status_msg.message_id)
-    except Exception as exc:
-        logger.exception("Unhandled error")
-        await status_msg.edit_text("❌ حدث خطأ غير متوقع أثناء المعالجة.")
+    except Exception:
+        logger.exception("Error in background download task")
+        try:
+            await status_msg.edit_text("❌ حدث خطأ أثناء المعالجة.")
+        except Exception:
+            pass
         await asyncio.sleep(4)
         await _safe_delete(context, message.chat_id, user_msg_id)
         await _safe_delete(context, message.chat_id, status_msg.message_id)
@@ -250,8 +240,7 @@ async def _run_download(message: Message, context: ContextTypes.DEFAULT_TYPE,
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "👋 *مرحباً!*\n\n"
-        "أرسل لي رابط فيديو مباشرة من أي منصة وسأقوم بتحميله فوراً بأعلى جودة أصلية متاحة للمنشور (4K/8K/Best).",
+        "👋 *مرحباً!*\n\nأرسل الروابط مباشرة وسأقوم بتحميلها متوازية فوراً بأعلى جودة.",
         parse_mode="Markdown",
     )
 
@@ -269,26 +258,26 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _safe_delete(context, message.chat_id, err_msg.message_id)
         return
 
-    # 1. إرسال رسالة حالة مؤقتة
     status_msg = await message.reply_text(
-        "⏳ *جاري فحص الرابط وبدء التحميل التلقائي بالجودة الكاملة...*",
+        "⏳ *جاري فحص الرابط وبدء التحميل التلقائي...*",
         parse_mode="Markdown"
     )
 
-    # 2. التحميل المباشر بجودة "best"
-    await _run_download(
-        message=message,
-        context=context,
-        url=url,
-        quality="best",
-        status_msg=status_msg,
-        user_msg_id=message.message_id,
+    # معالجة خلفية متوازية لأكثر من 20 رابط بالثانية
+    asyncio.create_task(
+        _run_download(
+            message=message,
+            context=context,
+            url=url,
+            quality="best",
+            status_msg=status_msg,
+            user_msg_id=message.message_id,
+        )
     )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Forbidden):
-        logger.warning("⚠️ Bot was blocked by the user or lacks permissions.")
         return
     logger.error("❌ Exception while handling an update:", exc_info=context.error)
 
@@ -297,7 +286,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     if not BOT_TOKEN:
-        raise RuntimeError("❌ TELEGRAM_BOT_TOKEN مفقود – ضعه في ملف .env")
+        raise RuntimeError("❌ TELEGRAM_BOT_TOKEN مفقود")
 
     logging.basicConfig(
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -312,14 +301,22 @@ def main() -> None:
         write_timeout=120.0,
     )
 
-    app = Application.builder().token(BOT_TOKEN).request(request_config).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request_config)
+        .concurrent_updates(True) 
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_error_handler(error_handler)
 
-    logger.info("🤖 Bot polling started | API: %s", DOWNLOAD_API_URL)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("🤖 Bot polling started | Parallel mode ON")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
     main()
+
