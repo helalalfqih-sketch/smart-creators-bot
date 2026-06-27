@@ -1,57 +1,41 @@
-"""
-FastAPI server – exposes /download (async, with SSE progress stream)
-and a /status/{job_id} endpoint for polling.
-
-Architecture:
-  POST /download  -> returns job_id immediately, starts background download
-  GET  /progress/{job_id} -> Server-Sent Events stream with progress %
-  GET  /result/{job_id}   -> returns file path once done (or error)
-  GET  /                  -> health check
-"""
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
-import uuid
-from pathlib import Path
 from typing import AsyncGenerator
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 
-from core.cache import create_cache
-from core.config import DOWNLOAD_DIR
-from core.worker import download_video
-from core.metadata import get_video_metadata, generate_video_thumbnail
+from api.schemas import (
+    EnqueueResponse,
+    HealthResponse,
+    JobFullResponse,
+    JobResultResponse,
+    JobStatusResponse,
+    MediaDownloadRequest,
+)
+from engine.media_engine import MediaEngine
+from job_queue.connection import is_redis_available
+from job_queue.job_store import JobStatus, get_job
+from storage.result_store import get_result
 
 logger = logging.getLogger("api")
 
-# ── Job store (in-process) ────────────────────────────────────────────────────
-# { job_id: {"status": "pending|running|done|error", "file": str|None,
-#             "error": str|None, "progress": float, "text": str,
-#             "duration": int, "width": int, "height": int, "thumbnail": str|None} }
-_jobs: dict[str, dict] = {}
-
-# Shared cache instance (set on startup)
-_cache = None
+_engine: MediaEngine | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cache
-    _cache = await create_cache()
+    global _engine
+    _engine = MediaEngine()
     yield
-    if _cache:
-        await _cache.close()
 
 
-app = FastAPI(title="Video Downloader API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Cloud Media Engine API", version="3.2.0", lifespan=lifespan)
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def is_valid_url(value: str) -> bool:
     try:
@@ -61,110 +45,188 @@ def is_valid_url(value: str) -> bool:
         return False
 
 
-async def _run_download_job(job_id: str, url: str, quality: str = "best") -> None:
-    """Background task: download and update job state."""
-    _jobs[job_id]["status"] = "running"
-
-    async def on_progress(text: str, pct: float) -> None:
-        _jobs[job_id]["text"] = text
-        _jobs[job_id]["progress"] = pct
-
-    try:
-        path = await download_video(url, quality=quality, cache=_cache, on_progress=on_progress)
-        _jobs[job_id]["status"] = "done"
-        _jobs[job_id]["file"] = str(path.resolve())
-        _jobs[job_id]["progress"] = 100.0
-        _jobs[job_id]["text"] = "✅ اكتمل التحميل"
-
-        # Extra metadata and thumbnail extraction
-        try:
-            meta = get_video_metadata(path)
-            _jobs[job_id]["duration"] = meta.get("duration", 0)
-            _jobs[job_id]["width"] = meta.get("width", 0)
-            _jobs[job_id]["height"] = meta.get("height", 0)
-
-            # Generate thumbnail in same folder if it's a video
-            if meta.get("width", 0) > 0 and meta.get("height", 0) > 0:
-                thumb_path = path.with_name(f"{path.stem}_thumb.jpg")
-                if generate_video_thumbnail(path, thumb_path):
-                    _jobs[job_id]["thumbnail"] = str(thumb_path.resolve())
-        except Exception as meta_exc:
-            logger.error("Error generating metadata/thumbnail for job %s: %s", job_id, meta_exc)
-
-    except Exception as exc:
-        _jobs[job_id]["status"] = "error"
-        _jobs[job_id]["error"] = str(exc)
-        _jobs[job_id]["text"] = "❌ فشل"
-        logger.exception("Job %s failed", job_id)
+def _validate_quality(quality: str) -> str:
+    allowed_qualities = {"144", "360", "480", "720", "1080", "best", "audio"}
+    if quality not in allowed_qualities:
+        return "best"
+    return quality
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@app.get("/")
-def health():
-    return {"status": "ok", "version": "2.0.0"}
-
-
-@app.post("/download")
-async def start_download(
-    url: str = Query(..., description="Video URL to download"),
-    quality: str = Query("best", description="Video quality: 144, 360, 480, 720, 1080, or best"),
-    background_tasks=None,
-    request: Request = None,
-):
+async def _enqueue_job(
+    url: str,
+    quality: str,
+    chat_id: int | None = None,
+    job_id: str | None = None,
+) -> str:
     if not is_valid_url(url):
         raise HTTPException(status_code=400, detail="رابط غير صالح")
 
-    # Validate quality value
-    allowed_qualities = {"144", "360", "480", "720", "1080", "best"}
-    if quality not in allowed_qualities:
-        quality = "best"
-
-    job_id = str(uuid.uuid4())
-    _jobs[job_id] = {
-        "status": "pending",
-        "file": None,
-        "error": None,
-        "progress": 0.0,
-        "text": "⏳ في الانتظار...",
-        "duration": 0,
-        "width": 0,
-        "height": 0,
-        "thumbnail": None,
-        "quality": quality,
-    }
-
-    # Fire the download task
-    asyncio.create_task(_run_download_job(job_id, url, quality))
-
-    return {"job_id": job_id, "status": "pending", "quality": quality}
+    quality = _validate_quality(quality)
+    result = await _engine.submit(
+        url,
+        quality,
+        job_id=job_id,
+        chat_id=chat_id,
+    )
+    return result.job_id
 
 
-@app.get("/result/{job_id}")
-def get_result(job_id: str):
-    job = _jobs.get(job_id)
+def _build_status_response(job: dict) -> JobStatusResponse:
+    return JobStatusResponse(
+        job_id=job["job_id"],
+        status=job.get("status", JobStatus.QUEUED.value),
+        progress=job.get("progress", 0.0),
+        text=job.get("text", ""),
+        error=job.get("error"),
+        url=job.get("url", ""),
+        quality=job.get("quality", "best"),
+        chat_id=job.get("chat_id"),
+        has_result=job.get("has_result", False),
+        created_at=job.get("created_at", ""),
+        updated_at=job.get("updated_at", ""),
+        started_at=job.get("started_at"),
+        completed_at=job.get("completed_at"),
+    )
+
+
+def _build_result_response(job_id: str, job: dict, result: dict | None) -> JobResultResponse:
+    if result:
+        return JobResultResponse(
+            job_id=job_id,
+            status=job.get("status", JobStatus.DONE.value),
+            media_type=result.get("media_type"),
+            file=result.get("file"),
+            duration=result.get("duration", 0),
+            width=result.get("width", 0),
+            height=result.get("height", 0),
+            thumbnail=result.get("thumbnail"),
+            completed_at=result.get("completed_at"),
+        )
+
+    return JobResultResponse(
+        job_id=job_id,
+        status=job.get("status", JobStatus.QUEUED.value),
+    )
+
+
+def _fetch_job_or_404(job_id: str) -> dict:
+    job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
 
 
+@app.get("/", response_model=HealthResponse)
+def health():
+    backend = "redis" if is_redis_available() else "memory"
+    return HealthResponse(
+        status="ok",
+        version="3.2.0",
+        engine="media-engine",
+        queue=backend if is_redis_available() else "in-process-fallback",
+        result_store=backend,
+    )
+
+
+@app.post("/media/download", response_model=EnqueueResponse)
+async def create_media_job(body: MediaDownloadRequest):
+    """Bot entry point – enqueue only, return job_id immediately."""
+    job_id = await _enqueue_job(body.url, body.quality, body.chat_id)
+    return EnqueueResponse(job_id=job_id, status="queued")
+
+
+@app.post("/download", response_model=EnqueueResponse)
+async def start_download(
+    url: str = Query(..., description="Video URL to download"),
+    quality: str = Query("best", description="Video quality: 144, 360, 480, 720, 1080, or best"),
+):
+    job_id = await _enqueue_job(url, quality)
+    return EnqueueResponse(job_id=job_id, status="queued")
+
+
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str):
+    """Track job lifecycle – status, progress, timestamps."""
+    job = await asyncio.to_thread(_fetch_job_or_404, job_id)
+    return _build_status_response(job)
+
+
+@app.get("/jobs/{job_id}/result", response_model=JobResultResponse)
+async def get_job_result(job_id: str):
+    """Fetch completed media result for a job."""
+    job = await asyncio.to_thread(_fetch_job_or_404, job_id)
+    status = job.get("status")
+
+    if status == JobStatus.ERROR.value:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "Job failed", "error": job.get("error")},
+        )
+
+    if status != JobStatus.DONE.value:
+        raise HTTPException(
+            status_code=202,
+            detail={"message": "Result not ready", "status": status},
+        )
+
+    result = await asyncio.to_thread(get_result, job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+
+    return _build_result_response(job_id, job, result)
+
+
+@app.get("/jobs/{job_id}/full", response_model=JobFullResponse)
+async def get_job_full(job_id: str):
+    """Combined job status + result (if available)."""
+    job = await asyncio.to_thread(_fetch_job_or_404, job_id)
+    result = await asyncio.to_thread(get_result, job_id)
+    return JobFullResponse(
+        job=_build_status_response(job),
+        result=_build_result_response(job_id, job, result) if result else None,
+    )
+
+
+@app.get("/result/{job_id}")
+async def get_result_legacy(job_id: str):
+    """Legacy combined payload for backward compatibility."""
+    job = await asyncio.to_thread(_fetch_job_or_404, job_id)
+    result = await asyncio.to_thread(get_result, job_id)
+
+    payload = dict(job)
+    if result:
+        payload.update(
+            {
+                "file": result.get("file"),
+                "media_type": result.get("media_type"),
+                "duration": result.get("duration", 0),
+                "width": result.get("width", 0),
+                "height": result.get("height", 0),
+                "thumbnail": result.get("thumbnail"),
+            }
+        )
+    return payload
+
+
 @app.get("/progress/{job_id}")
 async def progress_stream(job_id: str):
     """Server-Sent Events stream for real-time progress."""
-    if job_id not in _jobs:
+    initial = await asyncio.to_thread(get_job, job_id)
+    if initial is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
     async def event_generator() -> AsyncGenerator[str, None]:
         while True:
-            job = _jobs.get(job_id, {})
+            job = await asyncio.to_thread(get_job, job_id) or {}
             data = {
                 "status": job.get("status"),
                 "progress": job.get("progress", 0),
                 "text": job.get("text", ""),
+                "has_result": job.get("has_result", False),
             }
             yield f"data: {data}\n\n"
 
-            if job.get("status") in ("done", "error"):
+            if job.get("status") in (JobStatus.DONE.value, JobStatus.ERROR.value):
                 break
             await asyncio.sleep(1)
 

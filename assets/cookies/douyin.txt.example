@@ -1,0 +1,8 @@
+# Netscape HTTP Cookie File
+# Export cookies after logging into Douyin/TikTok using a browser extension
+# such as "Get cookies.txt LOCALLY" (Chrome/Edge).
+#
+# Place exported cookies in this file and rename to: douyin.txt
+#
+# Example format:
+# .douyin.com	TRUE	/	FALSE	0	cookie_name	cookie_value

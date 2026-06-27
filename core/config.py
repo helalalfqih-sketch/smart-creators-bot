@@ -36,9 +36,25 @@ YTDLP_FORMAT: str = _env("YTDLP_FORMAT", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/
 MAX_FILESIZE_MB: int = int(_env("MAX_FILESIZE_MB", "50"))   # Telegram limit for bots
 MAX_CONCURRENT_DOWNLOADS: int = int(_env("MAX_CONCURRENT_DOWNLOADS", "3"))
 
+# ── Smart Extractor ───────────────────────────────────────────────────────────
+COOKIES_DIR: Path = Path(_env("COOKIES_DIR", "assets/cookies"))
+COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+DOUYIN_COOKIES_PATH: Path = Path(_env("DOUYIN_COOKIES_PATH", str(COOKIES_DIR / "douyin.txt")))
+TIKTOK_COOKIES_PATH: Path = Path(_env("TIKTOK_COOKIES_PATH", str(COOKIES_DIR / "tiktok.txt")))
+EXTRACTOR_BROWSER: str = _env("EXTRACTOR_BROWSER", "chrome")
+EXTRACTOR_RETRIES: int = int(_env("EXTRACTOR_RETRIES", "3"))
+MOBILE_USER_AGENT: str = _env(
+    "MOBILE_USER_AGENT",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
+)
+
 # ── Redis (optional) ──────────────────────────────────────────────────────────
 REDIS_URL: str = _env("REDIS_URL", "redis://localhost:6379/0")
 CACHE_TTL_SECONDS: int = int(_env("CACHE_TTL_SECONDS", "3600"))  # 1 hour
+RQ_QUEUE_NAME: str = _env("RQ_QUEUE_NAME", "media")
+JOB_TTL_SECONDS: int = int(_env("JOB_TTL_SECONDS", "86400"))  # 24 hours
+RESULT_TTL_SECONDS: int = int(_env("RESULT_TTL_SECONDS", "86400"))  # 24 hours
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 HTTP_TIMEOUT_SECONDS: int = int(_env("HTTP_TIMEOUT_SECONDS", "300"))

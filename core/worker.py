@@ -24,6 +24,7 @@ from core.config import (
     MAX_FILESIZE_MB,
     YTDLP_FORMAT,
 )
+from engine.extractors.smart_extractor import SmartExtractor
 
 logger = logging.getLogger("worker")
 
@@ -89,69 +90,44 @@ async def download_video(
     out_template = str(DOWNLOAD_DIR / f"{file_id}.%(ext)s")
     max_bytes = MAX_FILESIZE_MB * 1024 * 1024
     fmt = _QUALITY_FORMAT.get(quality, YTDLP_FORMAT)
-
-    cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "--no-warnings",
-        "--newline",                # one progress line per update
-        "--progress",
-        "-f", fmt,
-        "-S", "ext:mp4:m4a",      # prefer mp4 extension when available
-        "--max-filesize", str(max_bytes),
-        "--merge-output-format", "mp4",
-        "--impersonate", "chrome", # bypass TikTok CDN restrictions
-        "-o", out_template,
-        url,
-    ]
+    extractor = SmartExtractor()
 
     async with _semaphore:
         if on_progress:
             await on_progress("🔍 جاري الجلب...", 0.0)
 
         loop = asyncio.get_running_loop()
+        last_percent = 0.0
 
-        def run_ytdlp_sync() -> tuple[int, list[str]]:
-            import subprocess
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1
-            )
+        def handle_line(line: str) -> None:
+            nonlocal last_percent
+            if "[download]" in line and "%" in line and on_progress:
+                try:
+                    pct_str = line.split("%")[0].split()[-1]
+                    pct = float(pct_str)
+                    if pct - last_percent >= 10:
+                        last_percent = pct
+                        asyncio.run_coroutine_threadsafe(
+                            on_progress(f"⬇️ تحميل... {pct:.0f}%", pct),
+                            loop,
+                        )
+                except ValueError:
+                    pass
 
-            output_lines: list[str] = []
-            last_percent = 0.0
+        def run_extractor_sync() -> tuple[int, list[str]]:
+            try:
+                result = extractor.extract(
+                    url,
+                    out_template=out_template,
+                    format_string=fmt,
+                    max_bytes=max_bytes,
+                    on_line=handle_line,
+                )
+                return 0, result.output_lines
+            except RuntimeError as exc:
+                return 1, str(exc).splitlines()
 
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    break
-                line = line.rstrip()
-                output_lines.append(line)
-
-                # Parse yt-dlp progress lines
-                if "[download]" in line and "%" in line:
-                    try:
-                        pct_str = line.split("%")[0].split()[-1]
-                        pct = float(pct_str)
-                        if pct - last_percent >= 10:
-                            last_percent = pct
-                            if on_progress:
-                                asyncio.run_coroutine_threadsafe(
-                                    on_progress(f"⬇️ تحميل... {pct:.0f}%", pct),
-                                    loop
-                                )
-                    except ValueError:
-                        pass
-
-            proc.wait()
-            return proc.returncode, output_lines
-
-        returncode, output_lines = await asyncio.to_thread(run_ytdlp_sync)
+        returncode, output_lines = await asyncio.to_thread(run_extractor_sync)
 
         if returncode != 0:
             tail = "\n".join(output_lines[-15:])

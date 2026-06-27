@@ -49,6 +49,8 @@ env/
 ### Project specific ###
 # .env  ← now committed so Railway can load it via python-dotenv
 downloads/
+assets/cookies/*.txt
+!assets/cookies/*.example
 *.mp4
 *.webm
 *.mkv
