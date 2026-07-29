@@ -19,6 +19,7 @@ class JobStatus(str, Enum):
     RUNNING = "running"
     DONE = "done"
     ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 def _job_key(job_id: str) -> str:
@@ -88,6 +89,43 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         return json.loads(raw)
 
     return _memory_jobs.get(job_id)
+
+
+def list_jobs(limit: int = 500) -> list[dict[str, Any]]:
+    """Return newest retained jobs from Redis or the in-process fallback store."""
+
+    safe_limit = max(1, min(int(limit), 5000))
+    redis_conn = get_redis_connection()
+    records: list[dict[str, Any]] = []
+
+    if redis_conn is not None:
+        for key in redis_conn.scan_iter(match="media:job:*", count=200):
+            raw = redis_conn.get(key)
+            if raw is None:
+                continue
+            try:
+                decoded = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                logger.warning("Ignoring malformed job record at key %r", key)
+                continue
+            if isinstance(decoded, dict):
+                records.append(decoded)
+    else:
+        records = [dict(record) for record in _memory_jobs.values()]
+
+    records.sort(
+        key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""),
+        reverse=True,
+    )
+    return records[:safe_limit]
+
+
+def delete_job(job_id: str) -> None:
+    redis_conn = get_redis_connection()
+    if redis_conn is not None:
+        redis_conn.delete(_job_key(job_id))
+    else:
+        _memory_jobs.pop(job_id, None)
 
 
 def update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
