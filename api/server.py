@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from contextlib import asynccontextmanager
 
+from api.admin import router as admin_router
+from api.admin import ws_router as admin_ws_router
 from api.schemas import (
     EnqueueResponse,
     HealthResponse,
@@ -34,7 +38,32 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Cloud Media Engine API", version="3.2.0", lifespan=lifespan)
+app = FastAPI(title="Cloud Media Engine API", version="3.3.0", lifespan=lifespan)
+
+
+def _configured_origins() -> list[str]:
+    raw = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if not raw:
+        return []
+    return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+
+
+_allowed_origins = _configured_origins()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_origin_regex=(
+        None
+        if _allowed_origins
+        else r"^https://(?:[a-z0-9-]+\.)*lovable\.app$|^http://localhost(?::\d+)?$"
+    ),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Admin-Token"],
+)
+
+app.include_router(admin_router)
+app.include_router(admin_ws_router)
 
 
 def is_valid_url(value: str) -> bool:
@@ -62,6 +91,8 @@ async def _enqueue_job(
         raise HTTPException(status_code=400, detail="رابط غير صالح")
 
     quality = _validate_quality(quality)
+    if _engine is None:
+        raise HTTPException(status_code=503, detail="Media engine is not ready")
     result = await _engine.submit(
         url,
         quality,
@@ -102,7 +133,6 @@ def _build_result_response(job_id: str, job: dict, result: dict | None) -> JobRe
             thumbnail=result.get("thumbnail"),
             completed_at=result.get("completed_at"),
         )
-
     return JobResultResponse(
         job_id=job_id,
         status=job.get("status", JobStatus.QUEUED.value),
@@ -121,7 +151,7 @@ def health():
     backend = "redis" if is_redis_available() else "memory"
     return HealthResponse(
         status="ok",
-        version="3.2.0",
+        version="3.3.0",
         engine="media-engine",
         queue=backend if is_redis_available() else "in-process-fallback",
         result_store=backend,
@@ -162,6 +192,9 @@ async def get_job_result(job_id: str):
             status_code=409,
             detail={"message": "Job failed", "error": job.get("error")},
         )
+
+    if status == JobStatus.CANCELLED.value:
+        raise HTTPException(status_code=410, detail="Job was cancelled")
 
     if status != JobStatus.DONE.value:
         raise HTTPException(
@@ -217,7 +250,11 @@ async def progress_stream(job_id: str):
 
     async def event_generator() -> AsyncGenerator[str, None]:
         while True:
-            job = await asyncio.to_thread(get_job, job_id) or {}
+            job = await asyncio.to_thread(get_job, job_id)
+            if job is None:
+                yield "data: {'status': 'cancelled', 'progress': 0, 'text': 'Job removed'}\n\n"
+                break
+
             data = {
                 "status": job.get("status"),
                 "progress": job.get("progress", 0),
@@ -226,7 +263,11 @@ async def progress_stream(job_id: str):
             }
             yield f"data: {data}\n\n"
 
-            if job.get("status") in (JobStatus.DONE.value, JobStatus.ERROR.value):
+            if job.get("status") in (
+                JobStatus.DONE.value,
+                JobStatus.ERROR.value,
+                JobStatus.CANCELLED.value,
+            ):
                 break
             await asyncio.sleep(1)
 
