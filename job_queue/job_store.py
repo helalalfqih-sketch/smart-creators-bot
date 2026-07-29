@@ -87,7 +87,45 @@ def get_job(job_id: str) -> dict[str, Any] | None:
             return None
         return json.loads(raw)
 
-    return _memory_jobs.get(job_id)
+    record = _memory_jobs.get(job_id)
+    return dict(record) if record is not None else None
+
+
+def list_jobs(*, limit: int = 200) -> list[dict[str, Any]]:
+    """Return recent jobs from Redis or the in-process fallback store."""
+    redis_conn = get_redis_connection()
+    records: list[dict[str, Any]] = []
+
+    if redis_conn is not None:
+        keys = list(redis_conn.scan_iter(match="media:job:*", count=200))
+        if keys:
+            values = redis_conn.mget(keys)
+            for raw in values:
+                if raw is None:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring malformed job record in Redis")
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+    else:
+        records = [dict(record) for record in _memory_jobs.values()]
+
+    records.sort(
+        key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""),
+        reverse=True,
+    )
+    return records[: max(0, limit)]
+
+
+def delete_job(job_id: str) -> bool:
+    """Delete one job from the active backing store."""
+    redis_conn = get_redis_connection()
+    if redis_conn is not None:
+        return bool(redis_conn.delete(_job_key(job_id)))
+    return _memory_jobs.pop(job_id, None) is not None
 
 
 def update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
