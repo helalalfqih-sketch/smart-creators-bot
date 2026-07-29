@@ -8,6 +8,7 @@ or:
 """
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
@@ -30,9 +31,17 @@ _load_env()
 from core.config import API_HOST, API_PORT, LOG_LEVEL  # noqa: E402 (after env load)
 from api.server import app  # noqa: E402  (re-export for uvicorn)
 
+_dashboard_log = RotatingFileHandler(
+    "dashboard.log",
+    maxBytes=5_000_000,
+    backupCount=2,
+    encoding="utf-8",
+)
 logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     level=getattr(logging, LOG_LEVEL, logging.INFO),
+    handlers=[logging.StreamHandler(), _dashboard_log],
+    force=True,
 )
 
 if __name__ == "__main__":
