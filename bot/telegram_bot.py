@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from logging.handlers import RotatingFileHandler
 
 import requests
 from telegram import Update
@@ -101,9 +102,17 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("❌ TELEGRAM_BOT_TOKEN مفقود")
 
+    bot_log = RotatingFileHandler(
+        "bot.log",
+        maxBytes=5_000_000,
+        backupCount=2,
+        encoding="utf-8",
+    )
     logging.basicConfig(
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         level=logging.INFO,
+        handlers=[logging.StreamHandler(), bot_log],
+        force=True,
     )
 
     from telegram.request import HTTPXRequest
