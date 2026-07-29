@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from contextlib import asynccontextmanager
 
+from api.admin import router as admin_router
 from api.schemas import (
     EnqueueResponse,
     HealthResponse,
@@ -34,7 +38,39 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Cloud Media Engine API", version="3.2.0", lifespan=lifespan)
+app = FastAPI(title="Cloud Media Engine API", version="3.3.0", lifespan=lifespan)
+
+
+def _configure_cors() -> None:
+    configured = [
+        origin.strip().rstrip("/")
+        for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    common = {
+        "allow_credentials": True,
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+    }
+    if configured:
+        app.add_middleware(CORSMiddleware, allow_origins=configured, **common)
+        return
+
+    # Empty ALLOWED_ORIGINS means any Lovable preview/published subdomain plus
+    # localhost development. It does not mean unrestricted wildcard CORS.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=(
+            r"^(https://(?:[A-Za-z0-9-]+\.)*lovable\.app"
+            r"|http://localhost(?::\d+)?"
+            r"|http://127\.0\.0\.1(?::\d+)?)$"
+        ),
+        **common,
+    )
+
+
+_configure_cors()
+app.include_router(admin_router)
 
 
 def is_valid_url(value: str) -> bool:
@@ -62,6 +98,8 @@ async def _enqueue_job(
         raise HTTPException(status_code=400, detail="رابط غير صالح")
 
     quality = _validate_quality(quality)
+    if _engine is None:
+        raise HTTPException(status_code=503, detail="Media engine is not ready")
     result = await _engine.submit(
         url,
         quality,
@@ -102,7 +140,6 @@ def _build_result_response(job_id: str, job: dict, result: dict | None) -> JobRe
             thumbnail=result.get("thumbnail"),
             completed_at=result.get("completed_at"),
         )
-
     return JobResultResponse(
         job_id=job_id,
         status=job.get("status", JobStatus.QUEUED.value),
@@ -121,7 +158,7 @@ def health():
     backend = "redis" if is_redis_available() else "memory"
     return HealthResponse(
         status="ok",
-        version="3.2.0",
+        version="3.3.0",
         engine="media-engine",
         queue=backend if is_redis_available() else "in-process-fallback",
         result_store=backend,
@@ -224,7 +261,7 @@ async def progress_stream(job_id: str):
                 "text": job.get("text", ""),
                 "has_result": job.get("has_result", False),
             }
-            yield f"data: {data}\n\n"
+            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
             if job.get("status") in (JobStatus.DONE.value, JobStatus.ERROR.value):
                 break
