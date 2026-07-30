@@ -53,9 +53,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_origin_regex=(
-        None
-        if _allowed_origins
-        else r"^https://(?:[a-z0-9-]+\.)*lovable\.app$|^http://localhost(?::\d+)?$"
+        r"^https://(?:[a-z0-9-]+\.)*(?:lovable\.app|lovableproject\.com)$"
+        r"|^http://localhost(?::\d+)?$"
     ),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
