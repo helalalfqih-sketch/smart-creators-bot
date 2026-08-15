@@ -148,7 +148,12 @@ class SmartExtractor:
                 return ExtractResult(output_lines=lines, mode=mode)
 
             combined = "\n".join(lines)
-            if mode == "primary" and not is_cookie_error(combined) and not _is_douyin_url(normalized_url):
+            if (
+                mode == "primary"
+                and not is_cookie_error(combined)
+                and not _is_douyin_url(normalized_url)
+                and not _is_tiktok_url(normalized_url)
+            ):
                 break
 
             if mode == "retry" and not is_cookie_error(combined):
