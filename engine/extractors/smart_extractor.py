@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -159,8 +162,71 @@ class SmartExtractor:
             if mode == "retry" and not is_cookie_error(combined):
                 logger.warning("Retry mode failed with non-cookie error for %s", normalized_url)
 
+        if _is_tiktok_url(normalized_url) or _is_douyin_url(normalized_url):
+            proxy_res = self._extract_via_proxy_api(normalized_url, out_template, on_line=on_line)
+            if proxy_res is not None:
+                return proxy_res
+
         tail = "\n".join(last_lines[-15:])
         raise RuntimeError(f"Smart extractor failed ({last_mode}):\n{tail[:800]}")
+
+    def _extract_via_proxy_api(
+        self,
+        url: str,
+        out_template: str,
+        on_line: LineCallback | None = None,
+    ) -> ExtractResult | None:
+        """Fallback extraction for TikTok/Douyin using zero-touch public APIs."""
+        logger.info("Attempting proxy API fallback for TikTok/Douyin url=%s", url)
+        try:
+            api_endpoint = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url)}&hd=1"
+            req = urllib.request.Request(
+                api_endpoint,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "application/json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            if data.get("code") == 0 and isinstance(data.get("data"), dict):
+                video_data = data["data"]
+                video_url = video_data.get("hdplay") or video_data.get("play")
+                if video_url:
+                    out_path_str = out_template
+                    if "%(" in out_path_str:
+                        out_path_str = out_path_str.replace("%(ext)s", "mp4")
+                        if "%(id)s" in out_path_str:
+                            out_path_str = out_path_str.replace("%(id)s", str(video_data.get("id", "video")))
+                        if "%(title)s" in out_path_str:
+                            out_path_str = out_path_str.replace("%(title)s", "video")
+
+                    target_path = Path(out_path_str)
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    v_req = urllib.request.Request(
+                        video_url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    with urllib.request.urlopen(v_req, timeout=30) as v_resp, open(target_path, "wb") as f:
+                        while True:
+                            chunk = v_resp.read(64 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+
+                    msg = f"[proxy_api] Successfully extracted TikTok video without cookies -> {target_path}"
+                    logger.info(msg)
+                    if on_line:
+                        on_line(msg)
+                    return ExtractResult(output_lines=[msg], mode="proxy_api")
+        except Exception as exc:
+            logger.warning("Proxy API fallback failed for %s: %s", url, exc)
+        return None
 
     def _common_args(
         self,

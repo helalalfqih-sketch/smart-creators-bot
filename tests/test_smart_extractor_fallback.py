@@ -38,3 +38,20 @@ class SmartExtractorFallbackTests(TestCase):
             )
 
         self.assertEqual(run_cmd.call_count, 1)
+
+    @patch.object(SmartExtractor, "_extract_via_proxy_api")
+    @patch.object(SmartExtractor, "_run_cmd")
+    def test_tiktok_yt_dlp_failure_triggers_proxy_api_fallback(self, run_cmd, extract_proxy):
+        from engine.extractors.smart_extractor import ExtractResult
+        run_cmd.return_value = (1, ["ERROR: TikTok anti-bot block"])
+        extract_proxy.return_value = ExtractResult(output_lines=["[proxy_api] success"], mode="proxy_api")
+
+        result = SmartExtractor().extract(
+            "https://www.tiktok.com/@owner/video/123",
+            out_template="/tmp/%(id)s.%(ext)s",
+            format_string="bestvideo*+bestaudio/bestvideo*",
+            max_bytes=50_000_000,
+        )
+
+        self.assertEqual(result.mode, "proxy_api")
+        self.assertTrue(extract_proxy.called)
