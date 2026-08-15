@@ -7,6 +7,7 @@ from typing import Any
 
 from core.config import JOB_TTL_SECONDS, RESULT_TTL_SECONDS
 from job_queue.connection import get_redis_connection
+from storage.object_store import create_signed_download_url
 
 logger = logging.getLogger("storage.result_store")
 
@@ -30,6 +31,8 @@ def save_result(
     width: int = 0,
     height: int = 0,
     thumbnail: str | None = None,
+    storage_key: str | None = None,
+    thumbnail_storage_key: str | None = None,
 ) -> dict[str, Any]:
     record = {
         "job_id": job_id,
@@ -39,6 +42,8 @@ def save_result(
         "width": width,
         "height": height,
         "thumbnail": thumbnail,
+        "storage_key": storage_key,
+        "thumbnail_storage_key": thumbnail_storage_key,
         "completed_at": _now_iso(),
     }
 
@@ -59,9 +64,22 @@ def get_result(job_id: str) -> dict[str, Any] | None:
         raw = redis_conn.get(_result_key(job_id))
         if raw is None:
             return None
-        return json.loads(raw)
+        record = json.loads(raw)
+        return _with_fresh_signed_urls(record)
 
-    return _memory_results.get(job_id)
+    record = _memory_results.get(job_id)
+    return _with_fresh_signed_urls(record) if record else None
+
+
+def _with_fresh_signed_urls(record: dict[str, Any]) -> dict[str, Any]:
+    hydrated = dict(record)
+    if hydrated.get("storage_key"):
+        hydrated["file"] = create_signed_download_url(hydrated["storage_key"])
+    if hydrated.get("thumbnail_storage_key"):
+        hydrated["thumbnail"] = create_signed_download_url(
+            hydrated["thumbnail_storage_key"]
+        )
+    return hydrated
 
 
 def delete_result(job_id: str) -> None:

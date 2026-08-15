@@ -56,6 +56,15 @@ RQ_QUEUE_NAME: str = _env("RQ_QUEUE_NAME", "media")
 JOB_TTL_SECONDS: int = int(_env("JOB_TTL_SECONDS", "86400"))  # 24 hours
 RESULT_TTL_SECONDS: int = int(_env("RESULT_TTL_SECONDS", "86400"))  # 24 hours
 
+# ── Private media storage ─────────────────────────────────────────────────────
+MEDIA_STORAGE_DRIVER: str = _env("MEDIA_STORAGE_DRIVER", "local").lower()
+S3_ENDPOINT_URL: str = _env("S3_ENDPOINT_URL")
+S3_REGION: str = _env("S3_REGION", "us-east-1")
+S3_BUCKET: str = _env("S3_BUCKET")
+S3_ACCESS_KEY_ID: str = _env("S3_ACCESS_KEY_ID")
+S3_SECRET_ACCESS_KEY: str = _env("S3_SECRET_ACCESS_KEY")
+S3_SIGNED_URL_TTL_SECONDS: int = int(_env("S3_SIGNED_URL_TTL_SECONDS", "900"))
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
 HTTP_TIMEOUT_SECONDS: int = int(_env("HTTP_TIMEOUT_SECONDS", "300"))
 LOG_LEVEL: str = _env("LOG_LEVEL", "INFO").upper()
