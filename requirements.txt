@@ -10,3 +10,6 @@ requests>=2.32,<3.0    # sync HTTP client for bot → API gateway
 faster-whisper>=1.0.0  # speech transcription for pro captions feature
 python-dotenv>=1.0.0   # load .env file automatically
 psutil>=6.0,<8.0       # real CPU, RAM, disk, and process metrics
+
+
+<!-- AI Studio E2E Safe Write Verification 2026-08-17T15:02:50.493Z -->
