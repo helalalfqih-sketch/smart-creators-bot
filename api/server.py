@@ -415,7 +415,7 @@ async def progress_stream(job_id: str):
 
 
 # ── Dashboard API Real Data Endpoints ─────────────────────────────────────────
-@app.get("/api/jobs", include_in_schema=False)
+@app.get("/api/jobs", include_in_schema=False, dependencies=[Depends(require_admin_auth)])
 async def api_jobs_list():
     from job_queue.job_store import list_jobs
     from api.admin import _download_payload
@@ -498,7 +498,7 @@ async def api_real_logs(limit: int = 100):
     return entries[-limit:]
 
 
-@app.get("/api/config", include_in_schema=False)
+@app.get("/api/config", include_in_schema=False, dependencies=[Depends(require_admin_auth)])
 async def api_get_config():
     from api.admin import _settings_payload
     return {"ok": True, "config": _settings_payload()}
@@ -699,7 +699,7 @@ async def api_telegram_send_media(body: dict):
             return resp.json()
 
 
-@app.get("/api/telegram/bot-info", include_in_schema=False)
+@app.get("/api/telegram/bot-info", include_in_schema=False, dependencies=[Depends(require_admin_auth)])
 async def api_telegram_bot_info():
     """Retrieve real bot information (getMe and getWebhookInfo) using the server's configured BOT_TOKEN."""
     token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
