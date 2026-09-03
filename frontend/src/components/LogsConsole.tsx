@@ -66,12 +66,7 @@ export const LogsConsole: React.FC<LogsConsoleProps> = ({ logs, onClear }) => {
   };
 
   const handleLiveTelegramPing = async () => {
-    const token = TelegramService.getSavedToken();
-    if (!token) {
-      engine.addLog('ERROR', '❌ لم يتم العثور على توكن البوت! يرجى إدخال التوكن في شاشة الإعدادات أولاً.', 'telegram_bot.py');
-      return;
-    }
-
+    const token = TelegramService.getSavedToken() || '';
     setPinging(true);
     const startTime = performance.now();
     engine.addLog('INFO', `📡 [PING] إرسال طلب فحص حي إلى Telegram API (https://api.telegram.org/bot.../getMe)...`, 'telegram_bot.py');

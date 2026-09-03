@@ -116,14 +116,12 @@ export const SystemStatus: React.FC<SystemStatusProps> = ({
 
   // Fetch Bot verification if token available
   useEffect(() => {
-    const token = settings?.BOT_TOKEN || TelegramService.getSavedToken();
-    if (token && token !== '••••••••' && token.includes(':')) {
-      TelegramService.testToken(token).then((res) => {
-        if (res.ok && res.bot) {
-          setBotInfo(res.bot);
-        }
-      });
-    }
+    const token = settings?.BOT_TOKEN || TelegramService.getSavedToken() || '';
+    TelegramService.testToken(token).then((res) => {
+      if (res.ok && res.bot) {
+        setBotInfo(res.bot);
+      }
+    });
   }, [settings?.BOT_TOKEN]);
 
   // Periodic heartbeat checker

@@ -120,19 +120,14 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
   };
 
   const handleSyncTelegram = async () => {
-    const token = TelegramService.getSavedToken();
-    if (!token) {
-      setSyncMessage('⚠️ يرجى حفظ توكن البوت في صفحة الإعدادات أولاً');
-      toast.warning('توكن البوت غير موجود', 'يرجى حفظ توكن البوت في صفحة الإعدادات أولاً.');
-      setTimeout(() => setSyncMessage(null), 4000);
-      return;
-    }
-
+    const token = TelegramService.getSavedToken() || '';
     setSyncingTelegram(true);
     setSyncMessage(null);
 
     try {
-      await TelegramService.deleteWebhook(token, false);
+      if (token && token.includes(':')) {
+        await TelegramService.deleteWebhook(token, false).catch(() => {});
+      }
       const res = await TelegramService.getUpdates(token, 25);
       if (res.ok && res.updates && res.updates.length > 0) {
         let addedCount = 0;

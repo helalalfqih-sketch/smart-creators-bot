@@ -40,14 +40,12 @@ export const Navbar: React.FC<NavbarProps> = ({
   }, []);
 
   useEffect(() => {
-    const token = TelegramService.getSavedToken();
-    if (token) {
-      TelegramService.testToken(token).then((res) => {
-        if (res.ok && res.bot) {
-          setBotInfo(res.bot);
-        }
-      });
-    }
+    const token = TelegramService.getSavedToken() || '';
+    TelegramService.testToken(token).then((res) => {
+      if (res.ok && res.bot) {
+        setBotInfo(res.bot);
+      }
+    });
   }, [activeTab]);
 
   const tabs = [

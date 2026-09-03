@@ -595,6 +595,66 @@ async def api_telegram_send_media(body: dict):
             return resp.json()
 
 
+@app.get("/api/telegram/bot-info", include_in_schema=False)
+async def api_telegram_bot_info():
+    """Retrieve real bot information (getMe and getWebhookInfo) using the server's configured BOT_TOKEN."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+    if not token:
+        raise HTTPException(status_code=500, detail="Bot token is not configured on the server")
+
+    import httpx
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        me_res = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+        me_data = me_res.json()
+        wh_res = await client.get(f"https://api.telegram.org/bot{token}/getWebhookInfo")
+        wh_data = wh_res.json()
+
+        if me_data.get("ok"):
+            return {
+                "ok": True,
+                "bot": me_data.get("result"),
+                "webhook": wh_data.get("result", {}),
+            }
+        return {"ok": False, "error": me_data.get("description", "Failed to retrieve bot info")}
+
+
+@app.post("/api/telegram/optimize-seo", include_in_schema=False)
+async def api_telegram_optimize_seo(body: dict | None = None):
+    """Set bot commands, name, and description for Telegram Search and SEO using server's BOT_TOKEN."""
+    token = (body and body.get("token")) or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+    if not token or token == "••••••••":
+        token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+    if not token:
+        raise HTTPException(status_code=500, detail="Bot token is not configured on the server")
+
+    commands = [
+        {"command": "start", "description": "بدء استخدام البوت وتحميل الفيديوهات"},
+        {"command": "quality", "description": "اختيار وتغيير جودة التحميل (4K, 1080p, MP3)"},
+        {"command": "help", "description": "طريقة الاستخدام والدعم الفني"},
+        {"command": "settings", "description": "إعدادات الحساب وإزالة العلامة المائية"},
+    ]
+
+    import httpx
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Set commands
+        await client.post(
+            f"https://api.telegram.org/bot{token}/setMyCommands",
+            json={"commands": commands}
+        )
+        # Set short description
+        await client.post(
+            f"https://api.telegram.org/bot{token}/setMyShortDescription",
+            json={"short_description": "أفضل بوت لتحميل الفيديوهات بأعلى دقة 4K بدون علامة مائية وصوت MP3."}
+        )
+        # Set description
+        await client.post(
+            f"https://api.telegram.org/bot{token}/setMyDescription",
+            json={"description": "⚡ Smart Creators Bot — بوت تنزيل الفيديوهات والصوتيات بأعلى جودة 4K UHD بدون علامة مائية. يدعم تيك توك، يوتيوب، انستغرام، Douyin، تويتر / X."}
+        )
+
+    return {"ok": True, "message": "تم تحديث أوامر البوت ووصف محركات بحث تيليجرام بنجاح 🚀"}
+
+
 @app.post("/api/telegram/toggle-daemon", include_in_schema=False)
 async def api_toggle_daemon(body: dict | None = None):
     global _bot_proc

@@ -361,19 +361,11 @@ export const ConfigSettings: React.FC<ConfigSettingsProps> = ({ settings, onSave
 
   // Auto test if token already exists on load
   useEffect(() => {
-    const activeToken = formData.BOT_TOKEN || TelegramService.getSavedToken();
-    if (activeToken && activeToken !== '••••••••') {
-      runBotTest(activeToken, false);
-    }
+    runBotTest(formData.BOT_TOKEN || TelegramService.getSavedToken(), false);
   }, []);
 
   const runBotTest = async (tokenToTest?: string, showSuccessToast = true) => {
     const token = tokenToTest || formData.BOT_TOKEN || '';
-    if (!token.trim() || token === '••••••••') {
-      setTestError('يرجى إدخال التوكن أولاً في الحقل أعلاه');
-      toast.warning('يرجى إدخال التوكن أولاً', 'اكتب أو الصق توكن البوت ثم اضغط فحص.');
-      return;
-    }
 
     setTestingToken(true);
     setTestError(null);
@@ -398,18 +390,16 @@ export const ConfigSettings: React.FC<ConfigSettingsProps> = ({ settings, onSave
     } else {
       setBotInfo(null);
       setTestError(res.error || 'فشل التحقق من التوكن');
-      toast.error('فشل التحقق من توكن تيليجرام', res.error || 'تأكد من صحة التوكن المأخوذ من @BotFather');
+      if (showSuccessToast) {
+        toast.error('فشل التحقق من توكن تيليجرام', res.error || 'تأكد من صحة التوكن المأخوذ من @BotFather');
+      }
       engine.addLog('ERROR', `فشل التحقق من توكن تيليجرام: ${res.error}`, 'telegram_bot.py');
     }
     setTestingToken(false);
   };
 
   const handleOptimizeTelegramSeo = async () => {
-    const token = formData.BOT_TOKEN || TelegramService.getSavedToken();
-    if (!token) {
-      toast.warning('يرجى إدخال التوكن أولاً', 'يجب إدخال توكن البوت لتطبيق تحسينات محركات البحث في تيليجرام.');
-      return;
-    }
+    const token = formData.BOT_TOKEN || TelegramService.getSavedToken() || '';
 
     setOptimizingSeo(true);
     setSeoResult(null);

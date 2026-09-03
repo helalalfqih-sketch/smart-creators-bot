@@ -211,8 +211,21 @@ export class TelegramService {
   // Test token and get bot profile (automatically clears webhook conflict if needed)
   public static async testToken(token: string): Promise<{ ok: boolean; bot?: TelegramBotInfo; error?: string }> {
     const cleanToken = token.trim();
-    if (!cleanToken || cleanToken === '••••••••') {
-      return { ok: false, error: 'يرجى إدخال التوكن أولاً' };
+    if (!cleanToken || cleanToken === '••••••••' || !cleanToken.includes(':')) {
+      try {
+        const res = await fetch('/api/telegram/bot-info');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.ok && data.bot) {
+            this.cachedBotInfo = data.bot;
+            return { ok: true, bot: data.bot };
+          }
+        }
+      } catch {}
+      if (this.cachedBotInfo) {
+        return { ok: true, bot: this.cachedBotInfo };
+      }
+      return { ok: false, error: 'التوكن غير متوفر أو لم يتم تكوينه بعد على السيرفر' };
     }
 
     try {
@@ -251,7 +264,18 @@ export class TelegramService {
   // Get Webhook Info
   public static async getWebhookInfo(token: string): Promise<{ ok: boolean; info?: TelegramWebhookInfo; error?: string }> {
     const cleanToken = token.trim();
-    if (!cleanToken) return { ok: false, error: 'التوكن غير متوفر' };
+    if (!cleanToken || cleanToken === '••••••••' || !cleanToken.includes(':')) {
+      try {
+        const res = await fetch('/api/telegram/bot-info');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.ok && data.webhook) {
+            return { ok: true, info: data.webhook };
+          }
+        }
+      } catch {}
+      return { ok: true, info: { url: '', has_custom_certificate: false, pending_update_count: 0 } };
+    }
 
     try {
       const response = await fetch(`https://api.telegram.org/bot${cleanToken}/getWebhookInfo`);
@@ -329,9 +353,28 @@ export class TelegramService {
     parseMode: 'HTML' | 'Markdown' = 'HTML',
     replyMarkup?: any
   ): Promise<{ ok: boolean; message?: any; error?: string }> {
-    const cleanToken = token.trim();
-    if (!cleanToken) return { ok: false, error: 'التوكن غير متوفر' };
+    const cleanToken = (token || '').trim();
     if (!chatId) return { ok: false, error: 'يرجى تحديد Chat ID للمستلم' };
+
+    // Fallback to server endpoint if token is not a raw token with colon
+    if (!cleanToken || cleanToken === '••••••••' || !cleanToken.includes(':')) {
+      try {
+        const res = await fetch('/api/telegram/send-media', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            caption: text,
+            type: 'text',
+          }),
+        });
+        const data = await res.json();
+        if (data.ok) return { ok: true, message: data.result };
+        return { ok: false, error: data.description || data.detail || 'فشل إرسال الرسالة من خادم البوت' };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || 'فشل الاتصال بخادم البوت' };
+      }
+    }
 
     try {
       const payload: any = {

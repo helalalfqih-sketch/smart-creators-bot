@@ -168,11 +168,7 @@ export const UsersManagement: React.FC<UsersManagementProps> = () => {
   const handleSendDirectMessage = async () => {
     if (!selectedUser || !msgText.trim()) return;
 
-    const token = TelegramService.getSavedToken() || engine.getSettings().BOT_TOKEN;
-    if (!token || token === '••••••••') {
-      toast.error('يرجى ضبط توكن بوت تيليجرام أولاً من الإعدادات لإرسال الرسائل');
-      return;
-    }
+    const token = TelegramService.getSavedToken() || engine.getSettings().BOT_TOKEN || '';
 
     setIsSendingMsg(true);
     try {
@@ -195,11 +191,7 @@ export const UsersManagement: React.FC<UsersManagementProps> = () => {
   const handleBroadcast = async () => {
     if (!broadcastText.trim()) return;
 
-    const token = TelegramService.getSavedToken() || engine.getSettings().BOT_TOKEN;
-    if (!token || token === '••••••••') {
-      toast.error('يرجى ضبط توكن بوت تيليجرام أولاً من الإعدادات');
-      return;
-    }
+    const token = TelegramService.getSavedToken() || engine.getSettings().BOT_TOKEN || '';
 
     let targetUsers = users;
     if (broadcastTarget === 'vip') {
