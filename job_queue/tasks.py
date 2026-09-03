@@ -7,6 +7,7 @@ from pathlib import Path
 from core.cache import create_cache
 from core.config import MEDIA_STORAGE_DRIVER
 from core.metadata import generate_video_thumbnail, get_video_metadata
+from core.url_normalizer import clear_active_job_for_url, normalize_media_url, set_active_job_for_url
 from core.video_analyzer import analyze_video
 from core.report_formatter import format_analysis_report
 from engine.classifier import classify
@@ -33,6 +34,7 @@ async def execute_download(
         mark_running(job_id, text=text, progress=pct)
 
     logger.info("WORKER_STARTED job_id=%s", job_id)
+    set_active_job_for_url(url, job_id)
     mark_running(job_id, text="🔍 جاري الجلب...", progress=0.0)
     path: Path | None = None
     thumbnail: str | None = None
@@ -128,6 +130,7 @@ async def execute_download(
         logger.exception("Download job %s failed", job_id)
         raise
     finally:
+        clear_active_job_for_url(url)
         if MEDIA_STORAGE_DRIVER == "s3":
             if path is not None:
                 path.unlink(missing_ok=True)

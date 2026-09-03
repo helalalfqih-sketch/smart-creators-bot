@@ -39,6 +39,7 @@ import {
   Filter,
   CheckSquare,
   Square,
+  MinusSquare,
   Send,
   Radio,
   SlidersHorizontal,
@@ -125,9 +126,6 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
     setSyncMessage(null);
 
     try {
-      if (token && token.includes(':')) {
-        await TelegramService.deleteWebhook(token, false).catch(() => {});
-      }
       const res = await TelegramService.getUpdates(token, 25);
       if (res.ok && res.updates && res.updates.length > 0) {
         let addedCount = 0;
@@ -960,15 +958,28 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
                   ? 'bg-indigo-950/80 border-indigo-600 text-indigo-300'
                   : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
               }`}
+              title={
+                isAllSelected
+                  ? 'إلغاء تحديد كافة العناصر'
+                  : isSomeSelected
+                  ? `تحديد باقي العناصر (${filtered.length - selectedIds.size})`
+                  : 'تحديد كافة العناصر المعروضة'
+              }
             >
               {isAllSelected ? (
                 <CheckSquare className="w-4 h-4 text-white" />
               ) : isSomeSelected ? (
-                <Square className="w-4 h-4 text-indigo-400" />
+                <MinusSquare className="w-4 h-4 text-indigo-400" />
               ) : (
                 <Square className="w-4 h-4 text-slate-400" />
               )}
-              <span>{isAllSelected ? 'إلغاء تحديد الكل' : 'تحديد الكل (Select All)'}</span>
+              <span>
+                {isAllSelected
+                  ? 'إلغاء تحديد الكل'
+                  : isSomeSelected
+                  ? `تحديد الباقي (${filtered.length - selectedIds.size})`
+                  : 'تحديد الكل (Select All)'}
+              </span>
             </button>
 
             {selectedIds.size > 0 && (

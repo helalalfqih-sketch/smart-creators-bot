@@ -22,6 +22,8 @@ from telegram.ext import (
 )
 
 from core.config import BOT_TOKEN, DOWNLOAD_API_URL
+from core.logging_filter import install_redacting_filter
+from core.url_normalizer import get_active_job_for_url, normalize_media_url
 
 logger = logging.getLogger("bot")
 
@@ -354,6 +356,18 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     redacted_cid = _redact_chat_id(chat_id)
     logger.info("TELEGRAM_UPDATE_RECEIVED update_id=%s chat_id=%s", update.update_id, redacted_cid)
 
+    # In-memory update_id deduplication fallback
+    seen_updates: set[int] = getattr(handle_url, "_seen_updates", None)
+    if seen_updates is None:
+        seen_updates = set()
+        setattr(handle_url, "_seen_updates", seen_updates)
+    if update.update_id in seen_updates:
+        logger.info("Duplicate telegram update %s skipped (memory)", update.update_id)
+        return
+    seen_updates.add(update.update_id)
+    if len(seen_updates) > 2000:
+        seen_updates.pop()
+
     # Redis idempotency check
     from job_queue.connection import get_redis_connection
     redis_conn = get_redis_connection()
@@ -361,7 +375,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         try:
             key = f"media:telegram_update:{update.update_id}"
             if not redis_conn.set(key, "1", nx=True, ex=86400):
-                logger.info("Duplicate telegram update %s skipped", update.update_id)
+                logger.info("Duplicate telegram update %s skipped (redis)", update.update_id)
                 return
         except Exception as exc:
             logger.warning("Redis idempotency check failed: %s", exc)
@@ -372,6 +386,21 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await asyncio.sleep(4)
         await _safe_delete(context, message.chat_id, message.message_id)
         await _safe_delete(context, message.chat_id, err_msg.message_id)
+        return
+
+    # P0-3: Check if an active download already exists for this normalized URL
+    norm_url = normalize_media_url(url)
+    existing_job_id = get_active_job_for_url(norm_url)
+    if existing_job_id:
+        logger.info("JOB_DEDUPLICATED original_job_id=%s url=%s", existing_job_id, _redact_url(url))
+        await message.reply_text(f"📥 هذا الرابط قيد المعالجة بالفعل:\nالمهمة: {existing_job_id}")
+        context.application.create_task(
+            wait_and_send_result(
+                context=context,
+                chat_id=message.chat_id,
+                job_id=existing_job_id,
+            )
+        )
         return
 
     try:
@@ -443,6 +472,7 @@ def main() -> None:
         handlers=[logging.StreamHandler(), bot_log, dash_log],
         force=True,
     )
+    install_redacting_filter()
     # Prevent httpx from logging full Telegram API URLs containing bot tokens
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -455,11 +485,27 @@ def main() -> None:
         write_timeout=120.0,
     )
 
+    async def _post_init(application: Application) -> None:
+        async def _heartbeat_loop():
+            import time
+            from job_queue.connection import get_redis_connection
+            while True:
+                try:
+                    r = get_redis_connection()
+                    if r is not None:
+                        r.set("media:bot:polling_heartbeat", str(time.time()), ex=60)
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+
+        asyncio.create_task(_heartbeat_loop())
+
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .request(request_config)
         .concurrent_updates(True)
+        .post_init(_post_init)
         .build()
     )
 

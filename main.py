@@ -31,6 +31,8 @@ _load_env()
 from core.config import API_HOST, API_PORT, LOG_LEVEL  # noqa: E402 (after env load)
 from api.server import app  # noqa: E402  (re-export for uvicorn)
 
+from core.logging_filter import install_redacting_filter
+
 _dashboard_log = RotatingFileHandler(
     "dashboard.log",
     maxBytes=5_000_000,
@@ -43,8 +45,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(), _dashboard_log],
     force=True,
 )
-for _uv_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
-    logging.getLogger(_uv_name).addHandler(_dashboard_log)
+install_redacting_filter()
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 

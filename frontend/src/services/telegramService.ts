@@ -1738,10 +1738,7 @@ export class TelegramService {
 
     if (onLog) onLog(`⚡ بدء الاستماع الحي لرسائل بوت تيليجرام واستخراج الروابط ومحرك البحث فوراً...`, 'INFO');
 
-    // Make sure webhook is clean on Telegram side
-    this.deleteWebhook(cleanToken, false).catch(() => {});
-
-    // Register official Telegram Menu button and commands
+    // Register official Telegram Menu button and commands safely
     this.registerBotCommands(cleanToken).catch(() => {});
 
     // In browser environment, the Server Daemon handles 24/7 background polling.

@@ -27,6 +27,14 @@ export function App() {
   const [logs, setLogs] = useState<LogEntry[]>(() => engine.getLogs());
   const [settings, setSettings] = useState<EnvSettings | null>(() => engine.getSettings());
   const [online, setOnline] = useState<boolean>(true);
+  const [usersCount, setUsersCount] = useState<number>(() => engine.getUsers().length);
+
+  useEffect(() => {
+    const unsub = engine.onUsersChange((u) => {
+      setUsersCount(u.length);
+    });
+    return () => unsub();
+  }, []);
 
   // Fetch / Sync state from REAL server endpoints
   const syncState = async () => {
@@ -395,7 +403,7 @@ export function App() {
         <div className="grid grid-cols-6 gap-1 max-w-md mx-auto">
           {[
             { id: 'downloader', label: 'الوسائط', icon: DownloadCloud },
-            { id: 'users', label: 'المستخدمين', icon: Users, count: engine.getUsers().length },
+            { id: 'users', label: 'المستخدمين', icon: Users, count: usersCount },
             { id: 'queue', label: 'المهام', icon: Activity, count: activeDownloads },
             { id: 'metrics', label: 'التحليلات', icon: BarChart3 },
             { id: 'logs', label: 'السجلات', icon: Terminal },

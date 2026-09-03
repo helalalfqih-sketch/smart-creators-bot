@@ -39,13 +39,32 @@ export const Navbar: React.FC<NavbarProps> = ({
     return () => unsub();
   }, []);
 
+  const [isPollingActive, setIsPollingActive] = useState<boolean>(false);
+
   useEffect(() => {
-    const token = TelegramService.getSavedToken() || '';
-    TelegramService.testToken(token).then((res) => {
-      if (res.ok && res.bot) {
-        setBotInfo(res.bot);
+    const checkBotStatus = async () => {
+      try {
+        const res = await fetch('/api/telegram/bot-status');
+        if (res.ok) {
+          const data = await res.json();
+          setIsPollingActive(Boolean(data.is_polling_active));
+          if (data.ok && data.process_alive !== undefined) {
+            setBotRunning(Boolean(data.process_alive));
+          }
+        }
+      } catch {}
+      const token = TelegramService.getSavedToken() || '';
+      if (token) {
+        TelegramService.testToken(token).then((res) => {
+          if (res.ok && res.bot) {
+            setBotInfo(res.bot);
+          }
+        });
       }
-    });
+    };
+    checkBotStatus();
+    const interval = setInterval(checkBotStatus, 15000);
+    return () => clearInterval(interval);
   }, [activeTab]);
 
   const tabs = [
@@ -119,13 +138,27 @@ export const Navbar: React.FC<NavbarProps> = ({
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gradient-to-r from-indigo-950/90 to-slate-900 border border-indigo-500/40 text-xs text-indigo-300 hover:text-white transition-all shadow-sm"
-                  title="بوت تيليجرام الحقيقي متصل"
+                  title={
+                    isPollingActive
+                      ? 'بوت تيليجرام متصل والاستماع الحي نشط 🟢'
+                      : botRunning
+                      ? 'البوت قيد التشغيل في الخادم 🟡'
+                      : 'التوكن مسجل ولكن المعالج متوقف 🔴'
+                  }
                 >
                   <Bot className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                   <span className="font-medium text-[11px] sm:text-xs max-w-[100px] sm:max-w-[140px] truncate">
                     @{botInfo.username || botInfo.first_name}
                   </span>
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      isPollingActive
+                        ? 'bg-emerald-400 animate-pulse'
+                        : botRunning
+                        ? 'bg-amber-400'
+                        : 'bg-rose-500'
+                    }`}
+                  />
                 </a>
               ) : (
                 <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800/90 border border-slate-700 text-[11px] sm:text-xs text-slate-300">

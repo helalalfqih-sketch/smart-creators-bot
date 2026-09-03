@@ -11,6 +11,7 @@ import { MediaExtractorService } from './mediaExtractor';
 import { TranslationService } from './translator';
 import { TelegramService } from './telegramService';
 import { AiVideoEnhancerService } from './aiEnhancer';
+import { DatabaseService } from '../db/database';
 
 /**
  * Strips all hashtags (#tag, #عربي, #123) and emojis/special pictographs from a string.
@@ -870,7 +871,17 @@ export class EngineService {
     this.jobs.delete(jobId);
     this.results.delete(jobId);
     this.persistState();
-    this.addLog('WARN', `[${jobId}] تم حذف المهمة نهائياً من الذاكرة`, 'job_queue.py');
+    this.addLog('WARN', `[${jobId}] تم حذف المهمة من الذاكرة`, 'job_queue.py');
+    try {
+      DatabaseService.getInstance().createAuditLog({
+        actor: 'ADMIN',
+        action: 'JOB_DELETED',
+        target_resource: `job:${jobId}`,
+        details: `حذف المهمة ${jobId} من طابور التحميل`,
+        ip_address: '127.0.0.1',
+      });
+      fetch(`/api/jobs/${jobId}`, { method: 'DELETE' }).catch(() => {});
+    } catch {}
   }
 
   public clearAllJobs() {
@@ -1027,6 +1038,15 @@ export class EngineService {
       this.persistState();
       this.notifyUserListeners();
       this.addLog('WARN', `تم حذف المستخدم (${key}) من لوحة الإدارة`, 'users_panel.py');
+      try {
+        DatabaseService.getInstance().createAuditLog({
+          actor: 'ADMIN',
+          action: 'USER_DELETED',
+          target_resource: `user:${key}`,
+          details: `حذف المستخدم ${key} من السجل العام`,
+          ip_address: '127.0.0.1',
+        });
+      } catch {}
     }
     return deleted;
   }

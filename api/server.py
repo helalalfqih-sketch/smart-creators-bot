@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from logging.handlers import RotatingFileHandler
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -38,7 +38,10 @@ from job_queue.connection import is_redis_available
 from job_queue.job_store import JobStatus, get_job
 from storage.result_store import get_result
 
+from core.logging_filter import install_redacting_filter
+
 logger = logging.getLogger("api")
+logger.propagate = False
 
 # Attach dashboard log file handler so all server events flow into the UI console
 _dash_handler = RotatingFileHandler(
@@ -51,29 +54,74 @@ _dash_handler.setFormatter(
     logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 )
 logger.addHandler(_dash_handler)
-logging.getLogger("uvicorn.error").addHandler(_dash_handler)
+install_redacting_filter(logger)
+
+# Silence redundant uvicorn access logs to prevent duplicate request lines
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 _engine: MediaEngine | None = None
 _dashboard_security = HTTPBasic(auto_error=False)
 
 
-def require_dashboard_auth(credentials: HTTPBasicCredentials | None = Depends(_dashboard_security)) -> None:
-    """Protect dashboard and API documentation when DASHBOARD_PASSWORD or ADMIN_API_TOKEN is set."""
-    expected_user = os.getenv("DASHBOARD_USERNAME", "admin").strip()
-    expected_pass = os.getenv("DASHBOARD_PASSWORD", "").strip() or os.getenv("ADMIN_API_TOKEN", "").strip()
+def require_admin_auth(
+    authorization: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+    credentials: HTTPBasicCredentials | None = Depends(_dashboard_security),
+) -> None:
+    """Unified authentication for dashboard & sensitive APIs:
+    Accepts:
+    - Header: X-Admin-Token
+    - Header: Authorization: Bearer <token>
+    - Header: Authorization: Basic <base64>
+    If neither ADMIN_API_TOKEN nor DASHBOARD_PASSWORD is configured, permits access.
+    """
+    # Normalize FastAPI parameter objects if invoked directly in unit tests
+    if not isinstance(authorization, str):
+        authorization = None
+    if not isinstance(x_admin_token, str):
+        x_admin_token = None
+    if not isinstance(credentials, HTTPBasicCredentials):
+        credentials = None
 
-    if not expected_pass:
+    expected_token = os.getenv("ADMIN_API_TOKEN", "").strip()
+    expected_user = os.getenv("DASHBOARD_USERNAME", "admin").strip()
+    expected_pass = os.getenv("DASHBOARD_PASSWORD", "").strip() or expected_token
+
+    if not expected_token and not expected_pass:
         return
 
-    if not credentials or not (
-        secrets.compare_digest(credentials.username, expected_user)
-        and secrets.compare_digest(credentials.password, expected_pass)
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": 'Basic realm="Smart Creators Bot Dashboard"'},
-        )
+    # 1. Check X-Admin-Token
+    if x_admin_token and expected_token and secrets.compare_digest(x_admin_token.strip(), expected_token):
+        return
+
+    # 2. Check Bearer token
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            cand = token.strip()
+            if expected_token and secrets.compare_digest(cand, expected_token):
+                return
+            if expected_pass and secrets.compare_digest(cand, expected_pass):
+                return
+
+    # 3. Check Basic Auth
+    if credentials:
+        if secrets.compare_digest(credentials.username, expected_user) and (
+            (expected_pass and secrets.compare_digest(credentials.password, expected_pass))
+            or (expected_token and secrets.compare_digest(credentials.password, expected_token))
+        ):
+            return
+
+    raise HTTPException(
+        status_code=401,
+        detail="Unauthorized",
+        headers={"WWW-Authenticate": 'Basic realm="Smart Creators Bot Dashboard"'},
+    )
+
+
+def require_dashboard_auth(credentials: HTTPBasicCredentials | None = Depends(_dashboard_security)) -> None:
+    """Backwards compatibility alias for require_admin_auth."""
+    require_admin_auth(credentials=credentials)
 
 
 @asynccontextmanager
@@ -399,7 +447,7 @@ async def api_get_job_detail(job_id: str):
     }
 
 
-@app.delete("/api/jobs/{job_id}", include_in_schema=False)
+@app.delete("/api/jobs/{job_id}", include_in_schema=False, dependencies=[Depends(require_admin_auth)])
 async def api_delete_job(job_id: str):
     from job_queue.job_store import delete_job
     from storage.result_store import delete_result
@@ -414,7 +462,7 @@ async def api_real_metrics():
     return await asyncio.to_thread(_metrics_payload)
 
 
-@app.get("/api/logs", include_in_schema=False)
+@app.get("/api/logs", include_in_schema=False, dependencies=[Depends(require_admin_auth)])
 async def api_real_logs(limit: int = 100):
     entries = []
     log_files = [
@@ -456,7 +504,7 @@ async def api_get_config():
     return {"ok": True, "config": _settings_payload()}
 
 
-@app.post("/api/config", include_in_schema=False)
+@app.post("/api/config", include_in_schema=False, dependencies=[Depends(require_admin_auth)])
 async def api_save_config(body: dict):
     from api.admin import _write_env_file, _settings_payload
     updates = body.get("config") if isinstance(body.get("config"), dict) else body
@@ -520,10 +568,38 @@ def _is_bot_running() -> bool:
     return False
 
 
+@app.get("/api/telegram/bot-status", include_in_schema=False)
 @app.get("/api/telegram/daemon-status", include_in_schema=False)
 async def api_daemon_status():
-    running = _is_bot_running()
-    return {"ok": True, "running": running, "isRunning": running, "status": "running" if running else "stopped"}
+    """True real-time polling health, process status, and bot info."""
+    proc_running = _is_bot_running()
+    last_hb = 0.0
+    from job_queue.connection import get_redis_connection
+    r = get_redis_connection()
+    if r is not None:
+        try:
+            val = r.get("media:bot:polling_heartbeat")
+            if val:
+                last_hb = float(val)
+        except Exception:
+            pass
+
+    now = time.time()
+    # Polling is considered actively listening if heartbeat was updated in last 35 seconds
+    is_polling_active = (now - last_hb) < 35.0 if last_hb > 0 else False
+    if proc_running and not is_polling_active and (r is None):
+        is_polling_active = True
+
+    return {
+        "ok": True,
+        "running": proc_running,
+        "isRunning": proc_running,
+        "process_alive": proc_running,
+        "is_polling_active": is_polling_active,
+        "last_heartbeat_age_seconds": round(now - last_hb, 1) if last_hb > 0 else None,
+        "status": "polling_active" if is_polling_active else ("process_running" if proc_running else "stopped"),
+        "message": "البوت يعمل ويستقبل التحديثات بنشاط 🟢" if is_polling_active else ("العملية قيد التشغيل لكن لم يُسجل نبض حي ⚠️" if proc_running else "حلقة الاستماع متوقفة 🔴"),
+    }
 
 
 @app.get("/api/telegram/recent-updates", include_in_schema=False)

@@ -157,9 +157,18 @@ export const UsersManagement: React.FC<UsersManagementProps> = () => {
     toast.success(`تم تغيير حالة المستخدم إلى: ${getStatusLabel(newStatus)}`);
   };
 
+  useEffect(() => {
+    const unsub = engine.onUsersChange((updated) => {
+      setUsers(updated);
+    });
+    return () => unsub();
+  }, []);
+
   const handleDeleteUser = (user: BotUser) => {
-    if (window.confirm(`هل أنت متأكد من حذف المستخدم (${user.first_name || user.chat_id}) نهائياً؟`)) {
+    if (window.confirm(`هل أنت متأكد من حذف المستخدم (${user.first_name || user.chat_id})؟`)) {
       engine.deleteUser(user.chat_id);
+      setUsers(engine.getUsers());
+      onRefresh?.();
       toast.info('تم حذف المستخدم من السجل');
     }
   };
