@@ -24,6 +24,25 @@ def _load_env(env_path: Path = Path(".env")) -> None:
 
 _load_env()
 
+# ── Prevent multiple bot instances on same host ──────────────────────────────
+import socket
+import sys
+
+_lock_socket = None
+
+
+def _acquire_instance_lock() -> None:
+    global _lock_socket
+    _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _lock_socket.bind(("127.0.0.1", 18492))
+    except socket.error:
+        print("⚠️ Another bot.py instance is already running on this container. Exiting duplicate.")
+        sys.exit(0)
+
+
+_acquire_instance_lock()
+
 from bot.telegram_bot import main  # noqa: E402
 
 if __name__ == "__main__":

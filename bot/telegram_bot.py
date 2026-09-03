@@ -323,6 +323,11 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Forbidden):
         return
+    from telegram.error import Conflict
+    if isinstance(context.error, Conflict):
+        logger.warning("⚠️ Telegram 409 Conflict: Another bot instance is active. Retrying with delay...")
+        await asyncio.sleep(8)
+        return
     logger.error("❌ Exception while handling an update:", exc_info=context.error)
 
 
