@@ -45,6 +45,8 @@ logging.basicConfig(
 )
 for _uv_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
     logging.getLogger(_uv_name).addHandler(_dashboard_log)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 if __name__ == "__main__":
     import uvicorn
