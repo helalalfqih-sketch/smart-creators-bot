@@ -51,8 +51,7 @@ _dash_handler.setFormatter(
     logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 )
 logger.addHandler(_dash_handler)
-for _logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
-    logging.getLogger(_logger_name).addHandler(_dash_handler)
+logging.getLogger("uvicorn.error").addHandler(_dash_handler)
 
 _engine: MediaEngine | None = None
 _dashboard_security = HTTPBasic(auto_error=False)

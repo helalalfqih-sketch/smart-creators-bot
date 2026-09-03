@@ -26,10 +26,18 @@ if _env_file.exists():
 else:
     print("⚠️  .env not found — relying on Railway environment variables")
 
+# ── Auto-detect Worker service on Render ──────────────────────────────────────
+_svc_name = os.environ.get("RENDER_SERVICE_NAME", "").lower()
+_svc_type = os.environ.get("SERVICE_TYPE", "").lower()
+if "worker" in _svc_name or _svc_type == "worker":
+    print(f"👷 Detected Worker service ({_svc_name or 'worker'}). Starting run_worker.py...")
+    _proc = subprocess.run([sys.executable, "run_worker.py"])
+    sys.exit(_proc.returncode)
+
 PORT = os.environ.get("PORT", "8080")
 
 # ── Fix port mismatch ──────────────────────────────────────────────────────────
-# Railway sets PORT (e.g. 8080) for external traffic.
+# Railway/Render sets PORT for external traffic.
 # We run uvicorn on that same PORT, so override DOWNLOAD_API_URL to match.
 os.environ["DOWNLOAD_API_URL"] = f"http://localhost:{PORT}"
 print(f"🔧 DOWNLOAD_API_URL set to http://localhost:{PORT}")
