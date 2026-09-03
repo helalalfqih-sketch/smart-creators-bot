@@ -344,6 +344,9 @@ def main() -> None:
         handlers=[logging.StreamHandler(), bot_log],
         force=True,
     )
+    # Prevent httpx from logging full Telegram API URLs containing bot tokens
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     from telegram.request import HTTPXRequest
 

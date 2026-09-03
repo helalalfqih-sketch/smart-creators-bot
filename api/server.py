@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import subprocess
 import time
 from contextlib import asynccontextmanager
@@ -11,9 +12,12 @@ from pathlib import Path
 from typing import AsyncGenerator
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from api.admin import router as admin_router
@@ -26,6 +30,7 @@ from api.schemas import (
     JobStatusResponse,
     MediaDownloadRequest,
 )
+from core.config import DOWNLOAD_DIR, HTTP_TIMEOUT_SECONDS
 from engine.media_engine import MediaEngine
 from job_queue.connection import is_redis_available
 from job_queue.job_store import JobStatus, get_job
@@ -34,6 +39,26 @@ from storage.result_store import get_result
 logger = logging.getLogger("api")
 
 _engine: MediaEngine | None = None
+_dashboard_security = HTTPBasic(auto_error=False)
+
+
+def require_dashboard_auth(credentials: HTTPBasicCredentials | None = Depends(_dashboard_security)) -> None:
+    """Protect dashboard and API documentation when DASHBOARD_PASSWORD or ADMIN_API_TOKEN is set."""
+    expected_user = os.getenv("DASHBOARD_USERNAME", "admin").strip()
+    expected_pass = os.getenv("DASHBOARD_PASSWORD", "").strip() or os.getenv("ADMIN_API_TOKEN", "").strip()
+
+    if not expected_pass:
+        return
+
+    if not credentials or not (
+        secrets.compare_digest(credentials.username, expected_user)
+        and secrets.compare_digest(credentials.password, expected_pass)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": 'Basic realm="Smart Creators Bot Dashboard"'},
+        )
 
 
 @asynccontextmanager
@@ -43,7 +68,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Cloud Media Engine API", version="3.3.0", lifespan=lifespan)
+app = FastAPI(
+    title="Cloud Media Engine API",
+    version="3.3.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+@app.get("/docs", include_in_schema=False, dependencies=[Depends(require_dashboard_auth)])
+async def custom_swagger_ui():
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="Smart Creators API - Documentation")
+
+
+@app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(require_dashboard_auth)])
+async def custom_openapi():
+    return get_openapi(title=app.title, version=app.version, routes=app.routes)
 
 
 def _configured_origins() -> list[str]:
@@ -494,8 +536,8 @@ if _frontend_dist.exists():
     if _assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="frontend-assets")
 
-    @app.get("/dashboard", include_in_schema=False)
-    @app.get("/dashboard/{full_path:path}", include_in_schema=False)
+    @app.get("/dashboard", include_in_schema=False, dependencies=[Depends(require_dashboard_auth)])
+    @app.get("/dashboard/{full_path:path}", include_in_schema=False, dependencies=[Depends(require_dashboard_auth)])
     async def serve_dashboard(full_path: str = ""):
         index_file = _frontend_dist / "index.html"
         if index_file.exists():
