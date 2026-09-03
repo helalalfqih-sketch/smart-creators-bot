@@ -107,17 +107,11 @@ export const LogsConsole: React.FC<LogsConsoleProps> = ({ logs, onClear }) => {
   };
 
   const handleFetchUpdatesLive = async () => {
-    const token = TelegramService.getSavedToken();
-    if (!token) {
-      engine.addLog('ERROR', '❌ لم يتم العثور على توكن البوت في الإعدادات.', 'telegram_bot.py');
-      return;
-    }
-
     setFetchingUpdates(true);
-    engine.addLog('INFO', '📥 [GetUpdates] طلب آخر الرسائل والتحديثات الحقيقية من تيليجرام...', 'telegram_bot.py');
+    engine.addLog('INFO', '📥 [GetUpdates] فحص آخر الرسائل والتحديثات الواردة من السيرفر...', 'telegram_bot.py');
 
     try {
-      const res = await TelegramService.getUpdates(token, 10);
+      const res = await TelegramService.getUpdates('', 10);
       if (res.ok && res.updates) {
         engine.addLog('INFO', `✅ تم استلام ${res.updates.length} تحديث/رسالة من خوادم تيليجرام`, 'telegram_bot.py');
 
