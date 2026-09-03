@@ -57,7 +57,10 @@ time.sleep(3)
 print("🤖 Starting Telegram bot...")
 bot_proc = subprocess.Popen([sys.executable, "bot.py"])
 
-print(f"✅ API PID={api_proc.pid} | Bot PID={bot_proc.pid}")
+print("👷 Starting background RQ worker...")
+worker_proc = subprocess.Popen([sys.executable, "run_worker.py"])
+
+print(f"✅ API PID={api_proc.pid} | Bot PID={bot_proc.pid} | Worker PID={worker_proc.pid}")
 
 
 def shutdown(signum, frame):
@@ -65,6 +68,8 @@ def shutdown(signum, frame):
     api_proc.terminate()
     if bot_proc and bot_proc.poll() is None:
         bot_proc.terminate()
+    if worker_proc and worker_proc.poll() is None:
+        worker_proc.terminate()
     sys.exit(0)
 
 
@@ -78,7 +83,12 @@ while True:
         print(f"❌ API process exited with code {api_proc.returncode}. Exiting...")
         if bot_proc and bot_proc.poll() is None:
             bot_proc.terminate()
+        if worker_proc and worker_proc.poll() is None:
+            worker_proc.terminate()
         sys.exit(1)
     if bot_proc and bot_proc.poll() is not None:
         print(f"⚠️ Bot process exited with code {bot_proc.returncode}. Keeping API & Dashboard alive.")
         bot_proc = None
+    if worker_proc and worker_proc.poll() is not None:
+        print(f"⚠️ Worker process exited with code {worker_proc.returncode}. Restarting worker...")
+        worker_proc = subprocess.Popen([sys.executable, "run_worker.py"])
