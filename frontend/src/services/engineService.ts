@@ -265,37 +265,38 @@ export class EngineService {
         const res = await fetch('/api/jobs');
         if (res.ok) {
           const data = await res.json();
-          if (data.ok && Array.isArray(data.jobs)) {
-            data.jobs.forEach((j: any) => {
-              const status: JobStatusResponse['status'] =
-                j.status === 'completed' || j.status === 'done'
-                  ? 'done'
-                  : j.status === 'failed' || j.status === 'error'
-                  ? 'error'
-                  : j.status === 'running'
-                  ? 'running'
-                  : j.status === 'paused'
-                  ? 'paused'
-                  : j.status === 'cancelled'
-                  ? 'cancelled'
-                  : 'queued';
+          const jobsList = Array.isArray(data) ? data : (data.ok && Array.isArray(data.jobs) ? data.jobs : []);
+          jobsList.forEach((j: any) => {
+            const rawStatus = (j.status || '').toLowerCase();
+            const status: JobStatusResponse['status'] =
+              rawStatus === 'completed' || rawStatus === 'done'
+                ? 'done'
+                : rawStatus === 'failed' || rawStatus === 'error'
+                ? 'error'
+                : rawStatus === 'running' || rawStatus === 'downloading'
+                ? 'running'
+                : rawStatus === 'paused'
+                ? 'paused'
+                : rawStatus === 'cancelled'
+                ? 'cancelled'
+                : 'queued';
 
-              this.jobs.set(j.job_id || j.id, {
-                job_id: j.job_id || j.id,
-                status,
-                progress: j.progress ?? 100,
-                text: j.stage || (status === 'done' ? 'مكتمل' : 'قيد المعالجة'),
-                url: j.url || '',
-                quality: j.quality || 'best',
-                chat_id: j.telegram_chat_id ? String(j.telegram_chat_id) : undefined,
-                original_msg_id: j.telegram_message_id,
-                has_result: status === 'done',
-                created_at: j.created_at || new Date().toISOString(),
-                updated_at: j.updated_at || new Date().toISOString(),
-                error: j.error,
-              });
+            const jId = j.job_id || j.id;
+            this.jobs.set(jId, {
+              job_id: jId,
+              status,
+              progress: j.progress ?? (status === 'done' ? 100 : 0),
+              text: j.stage || j.text || (status === 'done' ? 'مكتمل' : 'قيد المعالجة'),
+              url: j.url || '',
+              quality: j.quality || 'best',
+              chat_id: j.chat_id || (j.user && j.user !== 'unknown' ? String(j.user) : undefined),
+              original_msg_id: j.telegram_message_id,
+              has_result: status === 'done',
+              created_at: j.startedAt || j.created_at || new Date().toISOString(),
+              updated_at: j.updated_at || new Date().toISOString(),
+              error: j.error,
             });
-          }
+          });
         }
       }
     } catch (e) {

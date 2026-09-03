@@ -168,17 +168,34 @@ def _dashboard_status(raw: str) -> str:
 
 
 def _download_payload(job: dict[str, Any]) -> dict[str, Any]:
+    job_id = str(job.get("job_id", ""))
     chat_id = job.get("chat_id")
-    return {
-        "id": str(job.get("job_id", "")),
+    status = _dashboard_status(str(job.get("status", "")))
+    payload = {
+        "id": job_id,
+        "job_id": job_id,
         "url": str(job.get("url", "")),
         "platform": _platform_for_url(str(job.get("url", ""))),
-        "status": _dashboard_status(str(job.get("status", ""))),
+        "status": status,
         "progress": round(float(job.get("progress", 0.0) or 0.0), 1),
         "duration": _duration_text(job),
         "user": str(chat_id) if chat_id is not None else "unknown",
         "startedAt": str(job.get("started_at") or job.get("created_at") or ""),
     }
+    if status == "completed":
+        from storage.result_store import get_result
+        try:
+            res = get_result(job_id)
+            if res:
+                payload["file"] = res.get("file")
+                payload["thumbnail"] = res.get("thumbnail")
+                if res.get("width") and res.get("height"):
+                    payload["resolution_label"] = f"{res.get('width')}x{res.get('height')}"
+                if res.get("duration"):
+                    payload["duration"] = f"{int(float(res['duration']))}s"
+        except Exception:
+            pass
+    return payload
 
 
 def _metrics_payload() -> dict[str, Any]:

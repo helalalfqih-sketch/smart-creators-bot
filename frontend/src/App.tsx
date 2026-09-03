@@ -297,8 +297,8 @@ export function App() {
     });
 
     const timer = setInterval(() => {
-      setQueue(engine.getQueue());
-    }, 1000);
+      syncState();
+    }, 3000);
 
     // Activate Screen Wake Lock to prevent Android from putting page/browser into deep sleep
     const cleanupWakeLock = WakeLockService.initAutoWakeLock();
