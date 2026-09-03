@@ -229,6 +229,7 @@ def _fetch_job_or_404(job_id: str) -> dict:
 
 
 @app.get("/", response_model=HealthResponse)
+@app.head("/", include_in_schema=False)
 def health():
     backend = "redis" if is_redis_available() else "memory"
     return HealthResponse(
