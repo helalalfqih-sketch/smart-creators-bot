@@ -547,6 +547,54 @@ async def api_telegram_recent_updates(limit: int = 20):
     return {"ok": True, "updates": updates}
 
 
+@app.post("/api/telegram/send-media", include_in_schema=False)
+async def api_telegram_send_media(body: dict):
+    """Deliver a video, audio or card message to any Telegram chat/channel using the server's Bot token."""
+    chat_id = body.get("chat_id")
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="chat_id is required")
+
+    media_file = str(body.get("file") or body.get("url") or "").strip()
+    caption = str(body.get("caption") or "").strip()
+    media_type = str(body.get("type") or "video").lower()
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+    if not token:
+        raise HTTPException(status_code=500, detail="Bot token is not configured on the server")
+
+    import httpx
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        # Check if media_file is a local file on server disk
+        p = Path(media_file) if media_file else None
+        if p and p.is_file():
+            with open(p, "rb") as f:
+                files = {"video": (p.name, f, "video/mp4")} if media_type == "video" else {"document": (p.name, f)}
+                data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+                url = f"https://api.telegram.org/bot{token}/sendVideo" if media_type == "video" else f"https://api.telegram.org/bot{token}/sendDocument"
+                resp = await client.post(url, data=data, files=files)
+                return resp.json()
+
+        # Otherwise send via direct URL
+        if media_type == "video" and media_file.startswith("http"):
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendVideo",
+                json={"chat_id": chat_id, "video": media_file, "caption": caption, "parse_mode": "HTML"}
+            )
+            return resp.json()
+        elif media_type == "audio" and media_file.startswith("http"):
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendAudio",
+                json={"chat_id": chat_id, "audio": media_file, "caption": caption, "parse_mode": "HTML"}
+            )
+            return resp.json()
+        else:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": caption or media_file, "parse_mode": "HTML"}
+            )
+            return resp.json()
+
+
 @app.post("/api/telegram/toggle-daemon", include_in_schema=False)
 async def api_toggle_daemon(body: dict | None = None):
     global _bot_proc

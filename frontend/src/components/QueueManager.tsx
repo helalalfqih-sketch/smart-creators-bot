@@ -341,11 +341,6 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
 
   // Execute Share to Telegram Channel or User
   const handleExecuteShare = async () => {
-    const token = TelegramService.getSavedToken();
-    if (!token) {
-      toast.error('توكن البوت مفقود', 'يرجى إدخال وحفظ توكن البوت في صفحة الإعدادات أولاً.');
-      return;
-    }
     const cleanTarget = targetChatInput.trim();
     if (!cleanTarget) {
       toast.warning('حدد الوجهة', 'يرجى إدخال اسم القناة أو معرف المستخدم أو اختيار من القائمة.');
@@ -360,7 +355,6 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
       const item = itemsToShare[i];
       setShareProgressMsg(`جارٍ إرسال (${i + 1} من ${itemsToShare.length}): ${item.clean_title || item.filename || item.id}...`);
 
-      const videoFileUrl = item.file || item.url;
       const title = item.clean_title || item.filename || 'فيديو وسائط';
       
       let caption =
@@ -372,51 +366,28 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
         `\n🔗 <a href="${item.url}">رابط المصدر الأصلي</a>`;
 
       try {
-        if (shareFormat === 'video' && item.file) {
-          const res = await TelegramService.sendVideo(
-            token,
-            cleanTarget,
-            item.file,
-            caption,
-            item.thumbnail,
-            TelegramService.getMainReplyKeyboard(),
-            '1080p FHD'
-          );
-          if (res.ok) successCount++;
-          else {
-            // fallback to photo/card
-            if (item.thumbnail) {
-              await TelegramService.sendPhoto(token, cleanTarget, item.thumbnail, caption, {
-                inline_keyboard: [[{ text: '🚀 تنزيل الفيديو المباشر', url: item.file }]]
-              });
-              successCount++;
-            } else {
-              await TelegramService.sendMessage(token, cleanTarget, caption, 'HTML');
-              successCount++;
-            }
-          }
-        } else if (shareFormat === 'audio' && item.audio_url) {
-          await TelegramService.sendMessage(
-            token,
-            cleanTarget,
-            `🎵 <b>استخراج الصوت MP3:</b>\n\n🎬 ${TelegramService.escapeHtml(title)}\n📥 <a href="${item.audio_url}">رابط تحميل ملف الصوت المباشر</a>`,
-            'HTML'
-          );
-          successCount++;
-        } else {
-          // Card / Link format
-          if (item.thumbnail) {
-            await TelegramService.sendPhoto(token, cleanTarget, item.thumbnail, caption, {
-              inline_keyboard: [[{ text: '🚀 تنزيل الفيديو المباشر', url: item.file || item.url }]]
-            });
-            successCount++;
-          } else {
-            await TelegramService.sendMessage(token, cleanTarget, caption, 'HTML');
-            successCount++;
-          }
-        }
+        const payload = {
+          chat_id: cleanTarget,
+          file: item.file || item.url,
+          url: item.url,
+          caption,
+          type: shareFormat === 'audio' ? 'audio' : 'video',
+          thumbnail: item.thumbnail,
+        };
 
-        engine.addLog('INFO', `📤 تمت مشاركة الفيديو (${item.id}) بنجاح إلى القناة/المستخدم: ${cleanTarget}`, 'telegram_bot.py');
+        const res = await fetch('/api/telegram/send-media', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const resData = await res.json();
+        if (resData.ok) {
+          successCount++;
+          engine.addLog('INFO', `📤 تمت مشاركة الفيديو (${item.id}) بنجاح إلى القناة/المستخدم: ${cleanTarget}`, 'telegram_bot.py');
+        } else {
+          failCount++;
+          engine.addLog('ERROR', `❌ فشل إرسال الفيديو (${item.id}) إلى ${cleanTarget}: ${resData.description || resData.detail || 'خطأ'}`, 'telegram_bot.py');
+        }
       } catch (err: any) {
         failCount++;
         engine.addLog('ERROR', `❌ فشل إرسال الفيديو (${item.id}) إلى ${cleanTarget}: ${err?.message}`, 'telegram_bot.py');
@@ -437,12 +408,6 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
 
   // Fast direct resend of enhanced video to user via Telegram
   const handleResendEnhancedVideo = async (item: DashboardDownloadItem) => {
-    const token = TelegramService.getSavedToken();
-    if (!token) {
-      toast.error('توكن البوت مفقود', 'يرجى حفظ توكن البوت في الإعدادات لإعادة الإرسال.');
-      return;
-    }
-
     const targetChat = item.user && item.user !== 'API' && item.user !== 'anonymous' ? item.user : null;
     if (!targetChat) {
       openShareModal([item]);
@@ -465,23 +430,23 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
         `🛡️ <b>العلامة المائية:</b> تم تنظيفها وإزالتها بالكامل\n\n` +
         `📥 <a href="${TelegramService.escapeHtml(enhancedFile)}">رابط التحميل المباشر للنسخة المحسنة (4K)</a>`;
 
-      const res = await TelegramService.sendVideo(
-        token,
-        targetChat,
-        enhancedFile,
-        caption,
-        item.thumbnail,
-        item.available_qualities && item.available_qualities.length > 0
-          ? TelegramService.buildQualityInlineKeyboard(item.id, item.available_qualities, item.audio_url)
-          : TelegramService.getMainReplyKeyboard(),
-        '4K AI Enhanced'
-      );
-
-      if (res.ok) {
+      const res = await fetch('/api/telegram/send-media', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: targetChat,
+          file: enhancedFile,
+          caption,
+          type: 'video',
+          thumbnail: item.thumbnail,
+        }),
+      });
+      const resData = await res.json();
+      if (resData.ok) {
         toast.success('تم تسليم الفيديو المحسن! ✨', `تم إرسال الفيديو بنجاح إلى (${targetChat}).`);
         engine.addLog('INFO', `✨ تمت إعادة إرسال الفيديو المحسن (${item.id}) إلى ${targetChat}`, 'telegram_bot.py');
       } else {
-        toast.error('تعذر الإرسال المباشر', res.error || 'فشل إرسال الفيديو عبر تيليجرام.');
+        toast.error('تعذر الإرسال المباشر', resData.description || resData.detail || 'فشل إرسال الفيديو عبر تيليجرام.');
       }
     } catch (e: any) {
       toast.error('خطأ أثناء الإرسال', e?.message || 'تعذر الاتصال بتيليجرام');
