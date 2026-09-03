@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import AsyncGenerator
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from logging.handlers import RotatingFileHandler
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -37,6 +39,20 @@ from job_queue.job_store import JobStatus, get_job
 from storage.result_store import get_result
 
 logger = logging.getLogger("api")
+
+# Attach dashboard log file handler so all server events flow into the UI console
+_dash_handler = RotatingFileHandler(
+    "dashboard.log",
+    maxBytes=10_000_000,
+    backupCount=3,
+    encoding="utf-8",
+)
+_dash_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+)
+logger.addHandler(_dash_handler)
+for _logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+    logging.getLogger(_logger_name).addHandler(_dash_handler)
 
 _engine: MediaEngine | None = None
 _dashboard_security = HTTPBasic(auto_error=False)
@@ -111,6 +127,18 @@ app.add_middleware(
 
 app.include_router(admin_router)
 app.include_router(admin_ws_router)
+
+
+@app.middleware("http")
+async def log_requests_middleware(request: Request, call_next):
+    start_time = time.monotonic()
+    response = await call_next(request)
+    duration_ms = round((time.monotonic() - start_time) * 1000, 1)
+    client_ip = request.client.host if request.client else "unknown"
+    path = request.url.path
+    if not (path.startswith("/api/logs") or path.startswith("/assets") or path == "/favicon.ico"):
+        logger.info(f'{client_ip} - "{request.method} {path}" {response.status_code} ({duration_ms}ms)')
+    return response
 
 
 def is_valid_url(value: str) -> bool:

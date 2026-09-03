@@ -275,9 +275,6 @@ export class TelegramService {
     limit = 20,
     forceNetwork = false
   ): Promise<{ ok: boolean; updates?: TelegramUpdate[]; error?: string }> {
-    const cleanToken = token.trim();
-    if (!cleanToken) return { ok: false, error: 'التوكن غير متوفر' };
-
     // In browser environment, request updates cached by the server daemon to avoid 409 Conflict
     if (typeof window !== 'undefined') {
       if (typeof fetch !== 'undefined') {
@@ -293,6 +290,9 @@ export class TelegramService {
       }
       return { ok: true, updates: [...this.recentUpdatesBuffer].slice(-limit) };
     }
+
+    const cleanToken = token.trim();
+    if (!cleanToken) return { ok: false, error: 'التوكن غير متوفر' };
 
     try {
       const url = `https://api.telegram.org/bot${cleanToken}/getUpdates?timeout=30${forceNetwork ? '&offset=-' + limit : ''}`;

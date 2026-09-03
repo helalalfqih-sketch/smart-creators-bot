@@ -43,6 +43,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(), _dashboard_log],
     force=True,
 )
+for _uv_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+    logging.getLogger(_uv_name).addHandler(_dashboard_log)
 
 if __name__ == "__main__":
     import uvicorn
