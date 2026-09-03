@@ -23,6 +23,8 @@ _URL_QUERY_PATTERN = re.compile(
     r"(https?://[^\s\"\'<>]+)\?([^\s\"\'<>]+)"
 )
 
+_ANY_HTTP_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
+
 # Pattern for ChatID logging: "ChatID: 123456789" or "chat_id=123456789"
 _CHAT_ID_PATTERN = re.compile(r"(?i)\b(chat[-_]?id\s*[:=]\s*)([+-]?\d+)\b")
 
@@ -67,6 +69,9 @@ def redact_text(text: str) -> str:
         return m.group(0)
 
     text = _URL_QUERY_PATTERN.sub(_clean_url_query, text)
+
+    # Source and signed URLs are never useful in production logs.
+    text = _ANY_HTTP_URL_PATTERN.sub("[REDACTED_URL]", text)
 
     return text
 

@@ -25,7 +25,8 @@ class LoggingFilterTests(unittest.TestCase):
         sample = "Uploaded to https://r2.cloudflarestorage.com/media/test.mp4?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Signature=vjbyPxybdZaNmGa%2ByT272YEAiv4%3D"
         cleaned = redact_text(sample)
         self.assertNotIn("Signature=", cleaned)
-        self.assertIn("[REDACTED_QUERY]", cleaned)
+        self.assertIn("[REDACTED_URL]", cleaned)
+        self.assertNotIn("r2.cloudflarestorage.com", cleaned)
 
     def test_redact_s3_key(self):
         sample = "Using S3 access key AKIAIOSFODNN7EXAMPLE for upload"

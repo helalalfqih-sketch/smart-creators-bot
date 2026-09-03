@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from core.config import RQ_QUEUE_NAME
+from core.config import RQ_QUEUE_NAME, VIDEO_CONVERSION_TIMEOUT_SECONDS
 from job_queue.connection import get_redis_connection
 
 logger = logging.getLogger("job_queue")
@@ -50,7 +50,7 @@ def enqueue_download(
         quality,
         chat_id,
         job_id=job_id,
-        job_timeout="30m",
+        job_timeout=VIDEO_CONVERSION_TIMEOUT_SECONDS + 300,
         result_ttl=3600,
         failure_ttl=3600,
     )

@@ -78,14 +78,14 @@ async def download_video(
             cached_path = Path(cached)
             if cached_path.exists():
                 if quality == "audio":
-                    logger.info("Cache hit for %s", url)
+                    logger.info("Download cache hit")
                     if on_progress:
                         await on_progress("📦 من الكاش", 100.0)
                     return cached_path
 
                 cached_meta = await asyncio.to_thread(get_video_metadata, cached_path)
                 if cached_meta.get("width", 0) > 0 and cached_meta.get("height", 0) > 0:
-                    logger.info("Cache hit for %s", url)
+                    logger.info("Download cache hit")
                     if on_progress:
                         await on_progress("📦 من الكاش", 100.0)
                     return cached_path
@@ -266,4 +266,3 @@ async def enhance_video(
 
     logger.info("Enhanced video saved to %s", out_path)
     return out_path
-

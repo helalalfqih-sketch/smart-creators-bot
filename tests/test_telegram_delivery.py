@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 import tempfile
 
 # Mock optional/external libraries if not installed in sandbox
@@ -45,7 +45,8 @@ class TelegramDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "thumbnail": None,
             }
 
-            await telegram_bot._send_result_media(context, 123456, result)
+            with patch.object(telegram_bot, "confirm_job_delivery"):
+                await telegram_bot._send_result_media(context, 123456, result)
 
             context.bot.send_video.assert_called_once()
             call_kwargs = context.bot.send_video.call_args.kwargs
@@ -71,7 +72,8 @@ class TelegramDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "thumbnail": None,
             }
 
-            await telegram_bot._send_result_media(context, 123456, result)
+            with patch.object(telegram_bot, "confirm_job_delivery"):
+                await telegram_bot._send_result_media(context, 123456, result)
 
             context.bot.send_audio.assert_called_once()
             call_kwargs = context.bot.send_audio.call_args.kwargs
@@ -79,7 +81,7 @@ class TelegramDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(str(call_kwargs["audio"]), file_path)
             self.assertEqual(call_kwargs["duration"], 180)
 
-    async def test_send_result_media_sends_report_video_and_analysis_txt(self):
+    async def test_send_result_media_never_sends_report_or_analysis_txt(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
             file_path = f.name
             context = MagicMock()
@@ -98,16 +100,14 @@ class TelegramDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "report_text": ["القسم الأول من التقرير", "القسم الثاني من التقرير"],
             }
 
-            await telegram_bot._send_result_media(context, 123456, result)
+            with patch.object(telegram_bot, "confirm_job_delivery") as confirm:
+                await telegram_bot._send_result_media(context, 123456, result)
 
-            # 1. Report sent first in order
-            self.assertEqual(context.bot.send_message.call_count, 2)
-            # 2. Video sent
+            context.bot.send_message.assert_not_called()
             context.bot.send_video.assert_called_once()
-            # 3. Document sent with filename my_test_video.analysis.txt
-            context.bot.send_document.assert_called_once()
-            doc_kwargs = context.bot.send_document.call_args.kwargs
-            self.assertEqual(doc_kwargs["filename"], "my_test_video.analysis.txt")
+            context.bot.send_document.assert_not_called()
+            confirm.assert_called_once()
+            self.assertNotIn("caption", context.bot.send_video.call_args.kwargs)
 
     async def test_send_result_media_video_rejection_falls_back_to_document(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
@@ -125,7 +125,8 @@ class TelegramDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "height": 720,
             }
 
-            await telegram_bot._send_result_media(context, 123456, result)
+            with patch.object(telegram_bot, "confirm_job_delivery"):
+                await telegram_bot._send_result_media(context, 123456, result)
             # send_document should be called as fallback for the video
             context.bot.send_document.assert_called_once()
 

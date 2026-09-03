@@ -73,3 +73,18 @@ S3_SIGNED_URL_TTL_SECONDS: int = int(_env("S3_SIGNED_URL_TTL_SECONDS", "900"))
 # ── Misc ──────────────────────────────────────────────────────────────────────
 HTTP_TIMEOUT_SECONDS: int = int(_env("HTTP_TIMEOUT_SECONDS", "300"))
 LOG_LEVEL: str = _env("LOG_LEVEL", "INFO").upper()
+
+# ── Production video output ──────────────────────────────────────────────────
+VIDEO_OUTPUT_ENABLED: bool = _env("VIDEO_OUTPUT_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+VIDEO_OUTPUT_RESOLUTION: str = _env("VIDEO_OUTPUT_RESOLUTION", "4k").lower()
+VIDEO_OUTPUT_FPS: int = int(_env("VIDEO_OUTPUT_FPS", "60"))
+VIDEO_OUTPUT_CODEC: str = _env("VIDEO_OUTPUT_CODEC", "hevc").lower()
+VIDEO_OUTPUT_CRF: int = int(_env("VIDEO_OUTPUT_CRF", "20"))
+VIDEO_OUTPUT_PRESET: str = _env("VIDEO_OUTPUT_PRESET", "medium")
+VIDEO_OUTPUT_FIT: str = _env("VIDEO_OUTPUT_FIT", "pad").lower()
+VIDEO_FPS_MODE: str = _env("VIDEO_FPS_MODE", "duplicate").lower()
+VIDEO_CONVERSION_TIMEOUT_SECONDS: int = int(_env("VIDEO_CONVERSION_TIMEOUT_SECONDS", "1800"))
+VIDEO_CONVERSION_CONCURRENCY: int = int(_env("VIDEO_CONVERSION_CONCURRENCY", "1"))
+SEND_ANALYSIS_REPORT: bool = _env("SEND_ANALYSIS_REPORT", "false").lower() in {"1", "true", "yes", "on"}
+SEND_ANALYSIS_TEXT_FILE: bool = _env("SEND_ANALYSIS_TEXT_FILE", "false").lower() in {"1", "true", "yes", "on"}
+ADMIN_API_TOKEN: str = _env("ADMIN_API_TOKEN")

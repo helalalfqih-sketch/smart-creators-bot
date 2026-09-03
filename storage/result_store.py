@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -50,8 +49,6 @@ def save_result(
         "thumbnail": thumbnail,
         "storage_key": storage_key,
         "thumbnail_storage_key": thumbnail_storage_key,
-        "analysis": analysis,
-        "report_text": report_text,
         "completed_at": _now_iso(),
     }
 
@@ -81,8 +78,7 @@ def get_result(job_id: str) -> dict[str, Any] | None:
 
 def _with_fresh_signed_urls(record: dict[str, Any]) -> dict[str, Any]:
     hydrated = dict(record)
-    driver = os.getenv("MEDIA_STORAGE_DRIVER", "").strip().lower()
-    if driver == "s3":
+    if hydrated.get("storage_key") or hydrated.get("thumbnail_storage_key"):
         try:
             if hydrated.get("storage_key"):
                 hydrated["file"] = create_signed_download_url(hydrated["storage_key"])

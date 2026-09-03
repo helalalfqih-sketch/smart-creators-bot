@@ -17,6 +17,7 @@ _memory_jobs: dict[str, dict[str, Any]] = {}
 class JobStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
+    READY = "ready"
     DONE = "done"
     ERROR = "error"
     CANCELLED = "cancelled"
@@ -168,6 +169,21 @@ def mark_done(job_id: str, *, text: str = "✅ اكتمل التحميل") -> di
             "error": None,
         }
     )
+    return _persist(job_id, record)
+
+
+def mark_ready(job_id: str) -> dict[str, Any] | None:
+    """Result is persisted but Telegram delivery is not confirmed yet."""
+    record = get_job(job_id)
+    if record is None:
+        return None
+    record.update({
+        "status": JobStatus.READY.value,
+        "progress": 99.0,
+        "text": "جاهز للإرسال",
+        "has_result": True,
+        "error": None,
+    })
     return _persist(job_id, record)
 
 

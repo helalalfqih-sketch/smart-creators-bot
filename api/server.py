@@ -35,7 +35,7 @@ from api.schemas import (
 from core.config import DOWNLOAD_DIR, HTTP_TIMEOUT_SECONDS
 from engine.media_engine import MediaEngine
 from job_queue.connection import is_redis_available
-from job_queue.job_store import JobStatus, get_job
+from job_queue.job_store import JobStatus, get_job, mark_done
 from storage.result_store import get_result
 
 from core.logging_filter import install_redacting_filter
@@ -260,8 +260,6 @@ def _build_result_response(job_id: str, job: dict, result: dict | None) -> JobRe
             height=_to_int(result.get("height")),
             thumbnail=result.get("thumbnail"),
             completed_at=result.get("completed_at"),
-            analysis=result.get("analysis"),
-            report_text=result.get("report_text"),
         )
     return JobResultResponse(
         job_id=job_id,
@@ -327,7 +325,7 @@ async def get_job_result(job_id: str):
     if status == JobStatus.CANCELLED.value:
         raise HTTPException(status_code=410, detail="Job was cancelled")
 
-    if status != JobStatus.DONE.value:
+    if status not in {JobStatus.READY.value, JobStatus.DONE.value}:
         raise HTTPException(
             status_code=202,
             detail={"message": "Result not ready", "status": status},
@@ -343,6 +341,19 @@ async def get_job_result(job_id: str):
         raise HTTPException(status_code=404, detail="Result not found")
 
     return _build_result_response(job_id, job, result)
+
+
+@app.post("/jobs/{job_id}/delivered", dependencies=[Depends(require_admin_auth)])
+async def confirm_job_delivery(job_id: str):
+    """Mark complete only after Telegram accepted video or document delivery."""
+    job = await asyncio.to_thread(_fetch_job_or_404, job_id)
+    if job.get("status") == JobStatus.DONE.value:
+        return {"job_id": job_id, "status": JobStatus.DONE.value}
+    if job.get("status") != JobStatus.READY.value:
+        raise HTTPException(status_code=409, detail="Job is not ready for delivery")
+    await asyncio.to_thread(mark_done, job_id)
+    logger.info("JOB_COMPLETED job_id=%s", job_id)
+    return {"job_id": job_id, "status": JobStatus.DONE.value}
 
 
 @app.get("/jobs/{job_id}/full", response_model=JobFullResponse)
@@ -400,6 +411,7 @@ async def progress_stream(job_id: str):
             yield f"data: {data}\n\n"
 
             if job.get("status") in (
+                JobStatus.READY.value,
                 JobStatus.DONE.value,
                 JobStatus.ERROR.value,
                 JobStatus.CANCELLED.value,
@@ -844,5 +856,3 @@ if _frontend_dist.exists():
         if m_file.exists():
             return FileResponse(m_file, media_type="application/manifest+json")
         raise HTTPException(status_code=404)
-
-

@@ -142,7 +142,7 @@ class SmartExtractor:
 
         for mode, cmd in strategies:
             last_mode = mode
-            logger.info("Smart extractor trying mode=%s url=%s", mode, normalized_url)
+            logger.info("Smart extractor trying mode=%s", mode)
             returncode, lines = self._run_cmd(cmd, on_line=on_line)
             last_lines = lines
 
@@ -160,7 +160,7 @@ class SmartExtractor:
                 break
 
             if mode == "retry" and not is_cookie_error(combined):
-                logger.warning("Retry mode failed with non-cookie error for %s", normalized_url)
+                logger.warning("Retry mode failed with non-cookie error")
 
         if _is_tiktok_url(normalized_url) or _is_douyin_url(normalized_url):
             proxy_res = self._extract_via_proxy_api(normalized_url, out_template, on_line=on_line)
@@ -177,7 +177,7 @@ class SmartExtractor:
         on_line: LineCallback | None = None,
     ) -> ExtractResult | None:
         """Fallback extraction for TikTok/Douyin using zero-touch public APIs."""
-        logger.info("Attempting proxy API fallback for TikTok/Douyin url=%s", url)
+        logger.info("Attempting proxy API fallback for TikTok/Douyin")
         try:
             api_endpoint = f"https://www.tikwm.com/api/?url={urllib.parse.quote(url)}&hd=1"
             req = urllib.request.Request(
@@ -225,7 +225,7 @@ class SmartExtractor:
                         on_line(msg)
                     return ExtractResult(output_lines=[msg], mode="proxy_api")
         except Exception as exc:
-            logger.warning("Proxy API fallback failed for %s: %s", url, exc)
+            logger.warning("Proxy API fallback failed: %s", type(exc).__name__)
         return None
 
     def _common_args(

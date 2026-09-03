@@ -1,23 +1,44 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from pathlib import Path
 
 from core.cache import create_cache
-from core.config import MEDIA_STORAGE_DRIVER
+from core.config import (
+    CACHE_TTL_SECONDS,
+    MEDIA_STORAGE_DRIVER,
+    VIDEO_FPS_MODE,
+    VIDEO_OUTPUT_CODEC,
+    VIDEO_OUTPUT_CRF,
+    VIDEO_OUTPUT_FIT,
+    VIDEO_OUTPUT_FPS,
+    VIDEO_OUTPUT_PRESET,
+    VIDEO_OUTPUT_RESOLUTION,
+)
 from core.metadata import generate_video_thumbnail, get_video_metadata
 from core.url_normalizer import clear_active_job_for_url, normalize_media_url, set_active_job_for_url
-from core.video_analyzer import analyze_video
-from core.report_formatter import format_analysis_report
+from core.video_converter import prepare_video
 from engine.classifier import classify
 from engine.media_engine import MediaJob, _to_media_type
-from job_queue.job_store import mark_done, mark_error, mark_running
+from job_queue.job_store import mark_error, mark_ready, mark_running
 from storage.result_store import save_result
 from storage.object_store import delete_private_object, upload_private_file
 from workers.media_worker import MediaWorker
+from job_queue.connection import get_redis_connection
 
 logger = logging.getLogger("job_queue.tasks")
+
+
+def _conversion_cache_key(url: str) -> str:
+    settings = ":".join(map(str, (
+        VIDEO_OUTPUT_RESOLUTION, VIDEO_OUTPUT_FPS, VIDEO_OUTPUT_CODEC,
+        VIDEO_OUTPUT_CRF, VIDEO_OUTPUT_PRESET, VIDEO_OUTPUT_FIT, VIDEO_FPS_MODE,
+    )))
+    digest = hashlib.sha256(f"{normalize_media_url(url)}|{settings}".encode()).hexdigest()
+    return f"media:conversion:v1:{digest}"
 
 
 async def execute_download(
@@ -37,17 +58,45 @@ async def execute_download(
     set_active_job_for_url(url, job_id)
     mark_running(job_id, text="🔍 جاري الجلب...", progress=0.0)
     path: Path | None = None
+    downloaded_path: Path | None = None
     thumbnail: str | None = None
     uploaded_keys: list[str] = []
     completed = False
 
     try:
+        redis_conn = get_redis_connection()
+        if MEDIA_STORAGE_DRIVER == "s3" and redis_conn is not None:
+            cached_raw = redis_conn.get(_conversion_cache_key(url))
+            if cached_raw:
+                cached = json.loads(cached_raw)
+                result = save_result(
+                    job_id,
+                    file="",
+                    media_type="video",
+                    duration=int(cached.get("duration", 0)),
+                    width=int(cached.get("width", 0)),
+                    height=int(cached.get("height", 0)),
+                    storage_key=cached["storage_key"],
+                    filename=cached.get("filename", "video.mp4"),
+                )
+                mark_ready(job_id)
+                completed = True
+                logger.info("CONVERSION_CACHE_HIT job_id=%s", job_id)
+                return {"status": "completed", "result": result}
+
         job = MediaJob(id=job_id, url=url, quality=quality, chat_id=chat_id)
         logger.info("DOWNLOAD_STARTED job_id=%s", job_id)
         file_path = await worker.process(job, on_progress=on_progress)
-        path = Path(file_path)
+        downloaded_path = Path(file_path)
+        path = downloaded_path
         logger.info("DOWNLOAD_COMPLETED job_id=%s path=%s", job_id, path.name)
         media_type = _to_media_type(classify(file_path))
+
+        if media_type.value == "video":
+            mark_running(job_id, text="🎬 جارٍ تجهيز نسخة 4K بمعدل 60 إطارًا...", progress=80.0)
+            logger.info("CONVERSION_STARTED job_id=%s", job_id)
+            path, _, _ = await prepare_video(path)
+            logger.info("CONVERSION_COMPLETED job_id=%s", job_id)
 
         duration = 0
         width = 0
@@ -65,28 +114,6 @@ async def execute_download(
                     thumbnail = str(thumb_path.resolve())
         except Exception as meta_exc:
             logger.error("Metadata/thumbnail failed for job %s: %s", job_id, meta_exc)
-
-        # ── Video analysis ────────────────────────────────────
-        analysis: dict | None = None
-        report_text: list[str] | None = None
-        try:
-            mark_running(job_id, text="📊 جاري تحليل بيانات الفيديو...", progress=85.0)
-            logger.info("ANALYSIS_STARTED job_id=%s", job_id)
-            analysis = await asyncio.to_thread(analyze_video, path)
-            if analysis and "error" not in analysis:
-                report_text = format_analysis_report(analysis)
-                logger.info("Video analysis completed for job %s", job_id)
-                # Create analysis.txt file alongside the downloaded media
-                try:
-                    analysis_file = path.with_name(f"{path.stem}.analysis.txt")
-                    analysis_file.write_text("\n\n".join(report_text), encoding="utf-8")
-                except Exception as file_err:
-                    logger.warning("Could not write analysis.txt: %s", file_err)
-            else:
-                logger.warning("Video analysis returned error for job %s: %s",
-                               job_id, analysis.get("error") if analysis else "None")
-        except Exception as analysis_exc:
-            logger.error("Video analysis failed for job %s: %s", job_id, analysis_exc)
 
         storage_key: str | None = None
         thumbnail_storage_key: str | None = None
@@ -113,12 +140,25 @@ async def execute_download(
             thumbnail=thumbnail if MEDIA_STORAGE_DRIVER != "s3" else None,
             storage_key=storage_key,
             thumbnail_storage_key=thumbnail_storage_key,
-            analysis=analysis,
-            report_text=report_text,
+            analysis=None,
+            report_text=None,
             filename=path.name,
         )
-        mark_done(job_id)
+        mark_ready(job_id)
         completed = True
+
+        if storage_key and redis_conn is not None:
+            redis_conn.setex(
+                _conversion_cache_key(url),
+                CACHE_TTL_SECONDS,
+                json.dumps({
+                    "storage_key": storage_key,
+                    "duration": duration,
+                    "width": width,
+                    "height": height,
+                    "filename": path.name,
+                }),
+            )
 
         return {
             "status": "completed",
@@ -134,7 +174,8 @@ async def execute_download(
         if MEDIA_STORAGE_DRIVER == "s3":
             if path is not None:
                 path.unlink(missing_ok=True)
-                path.with_name("analysis.txt").unlink(missing_ok=True)
+            if downloaded_path is not None and downloaded_path != path:
+                downloaded_path.unlink(missing_ok=True)
             if thumbnail:
                 Path(thumbnail).unlink(missing_ok=True)
             if not completed:

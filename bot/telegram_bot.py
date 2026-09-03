@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from core.config import BOT_TOKEN, DOWNLOAD_API_URL
+from core.config import ADMIN_API_TOKEN, BOT_TOKEN, DOWNLOAD_API_URL
 from core.logging_filter import install_redacting_filter
 from core.url_normalizer import get_active_job_for_url, normalize_media_url
 
@@ -171,6 +171,13 @@ def get_job_result(job_id: str) -> dict:
     return response.json()
 
 
+def confirm_job_delivery(job_id: str) -> None:
+    endpoint = f"{DOWNLOAD_API_URL.rstrip('/')}/jobs/{job_id}/delivered"
+    headers = {"X-Admin-Token": ADMIN_API_TOKEN} if ADMIN_API_TOKEN else {}
+    response = requests.post(endpoint, headers=headers, timeout=API_REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+
 async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, result: dict) -> None:
     media_source = _telegram_media_source(result.get("file"))
     if media_source is None:
@@ -182,85 +189,40 @@ async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
     width = _positive_int(result.get("width"))
     height = _positive_int(result.get("height"))
     job_id = result.get("job_id", "")
-    redacted_cid = _redact_chat_id(chat_id)
-
-    # ── Step 8: Send analysis report text first ───────────────────────
-    report_text = result.get("report_text")
-    if report_text and isinstance(report_text, list):
-        for part in report_text:
-            if part and part.strip():
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=part,
-                        parse_mode=None,  # plain text for technical data
-                    )
-                except TelegramError as exc:
-                    logger.warning("Failed to send report part: %s", exc)
-        logger.info("TELEGRAM_REPORT_SENT job_id=%s chat_id=%s parts=%d", job_id, redacted_cid, len(report_text))
-
-    # ── Step 9 & 10: Send media file ──────────────────────────────────
-    caption = "✅ اكتمل التحميل"
 
     if media_type == "video":
         try:
             await context.bot.send_video(
                 chat_id=chat_id,
                 video=media_source,
-                caption=caption,
                 duration=duration,
                 width=width,
                 height=height,
                 thumbnail=thumbnail,
                 supports_streaming=True,
             )
-            logger.info("TELEGRAM_VIDEO_SENT job_id=%s chat_id=%s", job_id, redacted_cid)
+            logger.info("TELEGRAM_VIDEO_SENT job_id=%s", job_id)
         except (BadRequest, TelegramError) as exc:
             logger.warning("sendVideo rejected result; falling back to document: %s", exc)
-            await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
-            logger.info("TELEGRAM_VIDEO_SENT job_id=%s chat_id=%s (fallback_document)", job_id, redacted_cid)
+            await context.bot.send_document(chat_id=chat_id, document=media_source)
+            logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
     elif media_type == "audio":
         try:
             await context.bot.send_audio(
                 chat_id=chat_id,
                 audio=media_source,
-                caption=caption,
                 duration=duration,
                 thumbnail=thumbnail,
             )
-            logger.info("TELEGRAM_AUDIO_SENT job_id=%s chat_id=%s", job_id, redacted_cid)
+            logger.info("TELEGRAM_AUDIO_SENT job_id=%s", job_id)
         except TelegramError as exc:
             logger.warning("sendAudio failed; falling back to document: %s", exc)
-            await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
+            await context.bot.send_document(chat_id=chat_id, document=media_source)
     else:
-        await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
-        logger.info("TELEGRAM_VIDEO_SENT job_id=%s chat_id=%s", job_id, redacted_cid)
+        await context.bot.send_document(chat_id=chat_id, document=media_source)
+        logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
 
-    # ── Step 11: Send UTF-8 analysis file <video_filename>.analysis.txt ──
-    if report_text and isinstance(report_text, list):
-        try:
-            filename = result.get("filename")
-            if not filename and isinstance(media_source, Path):
-                filename = media_source.name
-            if not filename:
-                filename = "video.mp4"
-            base_name = Path(filename).stem
-            analysis_filename = f"{base_name}.analysis.txt"
-            analysis_bytes = "\n\n".join(report_text).encode("utf-8")
-            from io import BytesIO
-            doc_stream = BytesIO(analysis_bytes)
-            doc_stream.name = analysis_filename
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=doc_stream,
-                filename=analysis_filename,
-                caption=f"📄 تقرير التحليل: {analysis_filename}",
-            )
-            logger.info("TELEGRAM_TEXT_FILE_SENT job_id=%s filename=%s", job_id, analysis_filename)
-        except Exception as file_exc:
-            logger.warning("Failed to send analysis text document: %s", file_exc)
-
-    logger.info("JOB_COMPLETED job_id=%s", job_id)
+    await asyncio.to_thread(confirm_job_delivery, job_id)
 
 
 async def wait_and_send_result(
@@ -273,55 +235,60 @@ async def wait_and_send_result(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
 
+    conversion_notice_sent = False
     while loop.time() < deadline:
         try:
             job = await asyncio.to_thread(get_job_status, job_id)
             status = str(job.get("status") or "").lower()
 
             if status in {"queued", "running"}:
+                if (
+                    not conversion_notice_sent
+                    and str(job.get("text") or "").startswith("🎬")
+                ):
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="🎬 جارٍ تجهيز نسخة 4K بمعدل 60 إطارًا...",
+                    )
+                    conversion_notice_sent = True
                 await asyncio.sleep(poll_interval_seconds)
                 continue
 
-            if status in {"done", "completed"}:
+            if status in {"ready", "done", "completed"}:
                 result = await asyncio.to_thread(get_job_result, job_id)
                 if result.get("status") == "pending":
                     await asyncio.sleep(poll_interval_seconds)
                     continue
+                if not conversion_notice_sent and result.get("media_type") == "video":
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="🎬 جارٍ تجهيز نسخة 4K بمعدل 60 إطارًا...",
+                    )
+                    conversion_notice_sent = True
                 result["job_id"] = job_id
                 await _send_result_media(context, chat_id, result)
-                logger.info("Delivered result for job %s to chat %s", job_id, _redact_chat_id(chat_id))
+                logger.info("Telegram delivery confirmed for job %s", job_id)
                 return
 
             if status in {"error", "failed"}:
                 err_text = str(job.get("error") or "")
                 err_type = "ExtractionFailed" if "extractor" in err_text.lower() else "DownloadFailed"
                 logger.error("Download job %s failed: error_type=%s", job_id, err_type)
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="تعذر تنزيل هذا الرابط من المنصة حاليًا.",
-                )
+                await context.bot.send_message(chat_id=chat_id, text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.")
                 return
 
             if status == "cancelled":
                 logger.warning("Download job %s was cancelled", job_id)
-                await context.bot.send_message(chat_id=chat_id, text="⚠️ تم إلغاء مهمة التحميل.")
+                await context.bot.send_message(chat_id=chat_id, text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.")
                 return
 
             logger.error("Unexpected status %r for job %s", status, job_id)
-            await context.bot.send_message(chat_id=chat_id, text="❌ تعذر تحديد حالة مهمة التحميل.")
+            await context.bot.send_message(chat_id=chat_id, text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.")
             return
 
         except JobResultError as exc:
             logger.error("Cannot retrieve result for job %s (HTTP %s): %s", job_id, exc.status_code, exc)
-            if exc.status_code == 410:
-                text = "⚠️ تم إلغاء مهمة التحميل."
-            elif exc.status_code == 409:
-                text = "❌ فشل تحميل الوسائط. حاول مرة أخرى أو أرسل رابطًا مختلفًا."
-            elif exc.status_code == 404:
-                text = "❌ اكتملت المهمة لكن لم يتم العثور على ملف النتيجة."
-            else:
-                text = "❌ تعذر استلام نتيجة التحميل."
-            await context.bot.send_message(chat_id=chat_id, text=text)
+            await context.bot.send_message(chat_id=chat_id, text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.")
             return
         except Exception as exc:
             logger.error("Error polling result for job %s: %s", job_id, exc)
@@ -330,17 +297,14 @@ async def wait_and_send_result(
     logger.error("Timed out waiting for result of job %s (%ss)", job_id, timeout_seconds)
     await context.bot.send_message(
         chat_id=chat_id,
-        text="⏱ انتهت مهلة انتظار تحميل الوسائط. يرجى المحاولة لاحقاً.",
+        text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
     )
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    username = f"@{user.username}" if user and user.username else (user.first_name if user else f"ChatID:{chat_id}")
-    logger.info(f"⚡ [Telegram] Command /start received from {username} (ChatID: {chat_id})")
+    logger.info("Telegram /start command received")
     await update.effective_message.reply_text(
         "👋 *مرحباً!*\n\nأرسل الروابط مباشرة وسأقوم بتحميلها متوازية فوراً بأعلى جودة.",
         parse_mode="Markdown",
@@ -353,8 +317,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     chat_id = message.chat_id
-    redacted_cid = _redact_chat_id(chat_id)
-    logger.info("TELEGRAM_UPDATE_RECEIVED update_id=%s chat_id=%s", update.update_id, redacted_cid)
+    logger.info("TELEGRAM_UPDATE_RECEIVED update_id=%s", update.update_id)
 
     # In-memory update_id deduplication fallback
     seen_updates: set[int] = getattr(handle_url, "_seen_updates", None)
@@ -392,8 +355,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     norm_url = normalize_media_url(url)
     existing_job_id = get_active_job_for_url(norm_url)
     if existing_job_id:
-        logger.info("JOB_DEDUPLICATED original_job_id=%s url=%s", existing_job_id, _redact_url(url))
-        await message.reply_text(f"📥 هذا الرابط قيد المعالجة بالفعل:\nالمهمة: {existing_job_id}")
+        logger.info("JOB_DEDUPLICATED original_job_id=%s", existing_job_id)
         context.application.create_task(
             wait_and_send_result(
                 context=context,
@@ -405,8 +367,8 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     try:
         job_id = await asyncio.to_thread(send_job, url, message.chat_id)
-        logger.info("JOB_ENQUEUED job_id=%s url=%s", job_id, _redact_url(url))
-        await message.reply_text(f"📥 تم إنشاء المهمة: {job_id}")
+        logger.info("JOB_ENQUEUED job_id=%s", job_id)
+        await message.reply_text("⏳ جارٍ تحميل وتجهيز الفيديو بأعلى جودة...")
         context.application.create_task(
             wait_and_send_result(
                 context,
@@ -419,17 +381,15 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             name=f"telegram-delivery-{job_id}",
         )
     except Exception as exc:
-        logger.error(f"❌ [Telegram] Failed to create download job for {url}: {exc}", exc_info=True)
-        await message.reply_text("❌ فشل إنشاء المهمة. تأكد أن API Gateway يعمل.")
+        logger.error("Failed to create download job: %s", type(exc).__name__)
+        await message.reply_text("❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.")
 
 
 async def handle_other_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
         return
-    user = update.effective_user
-    username = f"@{user.username}" if user and user.username else f"ChatID:{message.chat_id}"
-    logger.info(f"📎 [Telegram] Non-text media received from {username} (ChatID: {message.chat_id})")
+    logger.info("Non-text Telegram media received")
     await message.reply_text("ℹ️ يرجى إرسال رابط الوسائط (فيديو/ريلز/تيك توك) لتحميله مباشرة.")
 
 

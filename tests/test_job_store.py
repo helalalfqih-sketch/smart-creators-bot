@@ -19,6 +19,10 @@ class JobStoreTests(unittest.TestCase):
         self.assertEqual(running["progress"], 45.0)
         self.assertIsNotNone(running["started_at"])
 
+        ready = job_store.mark_ready(job_id)
+        self.assertEqual(ready["status"], "ready")
+        self.assertIsNone(ready["completed_at"])
+
         done = job_store.mark_done(job_id)
         self.assertEqual(done["status"], "done")
         self.assertEqual(done["progress"], 100.0)
