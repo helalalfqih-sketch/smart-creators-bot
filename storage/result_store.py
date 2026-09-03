@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -35,10 +36,13 @@ def save_result(
     thumbnail_storage_key: str | None = None,
     analysis: dict[str, Any] | None = None,
     report_text: list[str] | None = None,
+    filename: str | None = None,
 ) -> dict[str, Any]:
     record = {
         "job_id": job_id,
         "file": file,
+        "filename": filename,
+        "status": "completed",
         "media_type": media_type,
         "duration": duration,
         "width": width,

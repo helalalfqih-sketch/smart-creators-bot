@@ -50,14 +50,19 @@ MOBILE_USER_AGENT: str = _env(
 )
 
 # ── Redis (optional) ──────────────────────────────────────────────────────────
-REDIS_URL: str = _env("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL: str = (
+    _env("REDIS_URL")
+    or _env("REDIS_INTERNAL_URL")
+    or _env("INTERNAL_REDIS_URL")
+    or "redis://localhost:6379/0"
+)
 CACHE_TTL_SECONDS: int = int(_env("CACHE_TTL_SECONDS", "3600"))  # 1 hour
 RQ_QUEUE_NAME: str = _env("RQ_QUEUE_NAME", "media")
 JOB_TTL_SECONDS: int = int(_env("JOB_TTL_SECONDS", "86400"))  # 24 hours
 RESULT_TTL_SECONDS: int = int(_env("RESULT_TTL_SECONDS", "86400"))  # 24 hours
 
 # ── Private media storage ─────────────────────────────────────────────────────
-MEDIA_STORAGE_DRIVER: str = _env("MEDIA_STORAGE_DRIVER", "local").lower()
+MEDIA_STORAGE_DRIVER: str = _env("MEDIA_STORAGE_DRIVER", "s3").lower()
 S3_ENDPOINT_URL: str = _env("S3_ENDPOINT_URL")
 S3_REGION: str = _env("S3_REGION", "us-east-1")
 S3_BUCKET: str = _env("S3_BUCKET")

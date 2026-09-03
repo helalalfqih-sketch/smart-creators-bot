@@ -292,6 +292,9 @@ def format_analysis_report(analysis: dict[str, Any]) -> list[str]:
         if audio.get("true_peak") and audio["true_peak"] != "غير محدد":
             lines.append(_section("أعلى True Peak"))
             lines.append(audio["true_peak"])
+    else:
+        lines.append(_section("مسار الصوت"))
+        lines.append("لا يحتوي الفيديو على مسار صوتي")
 
     # ── Overall bitrate ───────────────────────────────────
     obr = analysis.get("overall_bitrate", 0)
@@ -379,6 +382,18 @@ def format_analysis_report(analysis: dict[str, Any]) -> list[str]:
         if checksums.get("sha256"):
             lines.append(_section("SHA-256"))
             lines.append(checksums["sha256"])
+        if checksums.get("video_stream_sha256"):
+            lines.append(_section("SHA-256 لمسار الفيديو المضغوط"))
+            lines.append(checksums["video_stream_sha256"])
+        if checksums.get("audio_stream_sha256"):
+            lines.append(_section("SHA-256 لمسار الصوت المضغوط"))
+            lines.append(checksums["audio_stream_sha256"])
+        if checksums.get("video_decoded_hash"):
+            lines.append(_section("بصمة الفيديو بعد فك الترميز"))
+            lines.append(checksums["video_decoded_hash"])
+        if checksums.get("audio_decoded_hash"):
+            lines.append(_section("بصمة الصوت بعد فك الترميز"))
+            lines.append(checksums["audio_decoded_hash"])
 
     # ── Integrity ─────────────────────────────────────────
     integrity = analysis.get("integrity", {})

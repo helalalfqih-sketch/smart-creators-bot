@@ -32,6 +32,7 @@ async def execute_download(
     async def on_progress(text: str, pct: float) -> None:
         mark_running(job_id, text=text, progress=pct)
 
+    logger.info("WORKER_STARTED job_id=%s", job_id)
     mark_running(job_id, text="🔍 جاري الجلب...", progress=0.0)
     path: Path | None = None
     thumbnail: str | None = None
@@ -40,8 +41,10 @@ async def execute_download(
 
     try:
         job = MediaJob(id=job_id, url=url, quality=quality, chat_id=chat_id)
+        logger.info("DOWNLOAD_STARTED job_id=%s", job_id)
         file_path = await worker.process(job, on_progress=on_progress)
         path = Path(file_path)
+        logger.info("DOWNLOAD_COMPLETED job_id=%s path=%s", job_id, path.name)
         media_type = _to_media_type(classify(file_path))
 
         duration = 0
@@ -66,13 +69,14 @@ async def execute_download(
         report_text: list[str] | None = None
         try:
             mark_running(job_id, text="📊 جاري تحليل بيانات الفيديو...", progress=85.0)
+            logger.info("ANALYSIS_STARTED job_id=%s", job_id)
             analysis = await asyncio.to_thread(analyze_video, path)
             if analysis and "error" not in analysis:
                 report_text = format_analysis_report(analysis)
                 logger.info("Video analysis completed for job %s", job_id)
                 # Create analysis.txt file alongside the downloaded media
                 try:
-                    analysis_file = path.with_name("analysis.txt")
+                    analysis_file = path.with_name(f"{path.stem}.analysis.txt")
                     analysis_file.write_text("\n\n".join(report_text), encoding="utf-8")
                 except Exception as file_err:
                     logger.warning("Could not write analysis.txt: %s", file_err)
@@ -89,6 +93,7 @@ async def execute_download(
         if MEDIA_STORAGE_DRIVER == "s3":
             storage_key = upload_private_file(path, job_id=job_id, kind="media")
             uploaded_keys.append(storage_key)
+            logger.info("R2_UPLOAD_COMPLETED job_id=%s key=%s", job_id, storage_key)
             result_file = ""
             if thumbnail:
                 thumbnail_storage_key = upload_private_file(
@@ -108,12 +113,13 @@ async def execute_download(
             thumbnail_storage_key=thumbnail_storage_key,
             analysis=analysis,
             report_text=report_text,
+            filename=path.name,
         )
         mark_done(job_id)
         completed = True
 
         return {
-            "status": "done",
+            "status": "completed",
             "result": result,
         }
 

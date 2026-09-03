@@ -34,10 +34,11 @@ def _run_ffprobe(args: list[str], path: str) -> dict | None:
 
 
 def _compute_checksums(path: str) -> dict[str, str]:
-    """Compute MD5, SHA-1, SHA-256 of the file."""
+    """Compute MD5, SHA-1, SHA-256 of the file and stream hashes."""
     md5 = hashlib.md5()
     sha1 = hashlib.sha1()
     sha256 = hashlib.sha256()
+    res: dict[str, str] = {}
     try:
         with open(path, "rb") as f:
             while True:
@@ -47,14 +48,63 @@ def _compute_checksums(path: str) -> dict[str, str]:
                 md5.update(chunk)
                 sha1.update(chunk)
                 sha256.update(chunk)
-        return {
-            "md5": md5.hexdigest(),
-            "sha1": sha1.hexdigest(),
-            "sha256": sha256.hexdigest(),
-        }
+        res["md5"] = md5.hexdigest()
+        res["sha1"] = sha1.hexdigest()
+        res["sha256"] = sha256.hexdigest()
     except OSError as exc:
         logger.error("Checksum computation failed: %s", exc)
         return {}
+
+    # Stream-specific hashes via ffmpeg
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-v", "quiet", "-i", path, "-map", "0:v:0", "-c", "copy", "-f", "hash", "-hash", "sha256", "-"],
+            capture_output=True, text=True, timeout=25,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            raw_hash = p.stdout.strip().split("=")[-1].strip()
+            if raw_hash:
+                res["video_stream_sha256"] = raw_hash
+    except Exception:
+        pass
+
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-v", "quiet", "-i", path, "-map", "0:a:0", "-c", "copy", "-f", "hash", "-hash", "sha256", "-"],
+            capture_output=True, text=True, timeout=25,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            raw_hash = p.stdout.strip().split("=")[-1].strip()
+            if raw_hash:
+                res["audio_stream_sha256"] = raw_hash
+    except Exception:
+        pass
+
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-v", "quiet", "-i", path, "-map", "0:v:0", "-f", "hash", "-hash", "sha256", "-"],
+            capture_output=True, text=True, timeout=35,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            raw_hash = p.stdout.strip().split("=")[-1].strip()
+            if raw_hash:
+                res["video_decoded_hash"] = raw_hash
+    except Exception:
+        pass
+
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-v", "quiet", "-i", path, "-map", "0:a:0", "-f", "hash", "-hash", "sha256", "-"],
+            capture_output=True, text=True, timeout=25,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            raw_hash = p.stdout.strip().split("=")[-1].strip()
+            if raw_hash:
+                res["audio_decoded_hash"] = raw_hash
+    except Exception:
+        pass
+
+    return res
 
 
 def _classify_resolution(width: int, height: int) -> str:
@@ -320,6 +370,8 @@ def analyze_video(path: Path | str) -> dict[str, Any]:
         report["error"] = "فشل ffprobe في قراءة الملف"
         return report
 
+    logger.info("FFPROBE_COMPLETED")
+
     fmt = probe.get("format", {})
     streams = probe.get("streams", [])
 
@@ -450,6 +502,7 @@ def analyze_video(path: Path | str) -> dict[str, Any]:
         # Audio loudness (LUFS, LRA, True Peak)
         loudness = _analyze_audio_loudness(path_str)
         report["audio"].update(loudness)
+        logger.info("AUDIO_ANALYSIS_COMPLETED")
 
     # ── Yemen time ────────────────────────────────────────────────
     report["yemen_time"] = _format_yemen_time(report.get("creation_time"))
@@ -458,15 +511,18 @@ def analyze_video(path: Path | str) -> dict[str, Any]:
     frame_analysis = _get_frame_analysis(path_str)
     if frame_analysis:
         report["frames"] = frame_analysis
+    logger.info("FRAME_ANALYSIS_COMPLETED")
 
     # ── Checksums ─────────────────────────────────────────────────
     checksums = _compute_checksums(path_str)
     if checksums:
         report["checksums"] = checksums
+    logger.info("HASHES_COMPLETED")
 
     # ── Integrity check ───────────────────────────────────────────
     integrity = _check_integrity(path_str)
     report["integrity"] = integrity
+    logger.info("INTEGRITY_CHECK_COMPLETED")
 
     # ── Summary ───────────────────────────────────────────────────
     summary_parts = []
@@ -489,5 +545,6 @@ def analyze_video(path: Path | str) -> dict[str, Any]:
         summary_parts.append("الملف يحتوي على بعض التحذيرات.")
 
     report["summary"] = "\n".join(summary_parts)
+    logger.info("ANALYSIS_COMPLETED")
 
     return report

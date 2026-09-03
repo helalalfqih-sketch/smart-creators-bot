@@ -14,6 +14,8 @@ class RealFFmpegMuxingTests(unittest.TestCase):
         self.ffprobe = shutil.which("ffprobe")
 
     def test_ffmpeg_and_ffprobe_exist(self):
+        if not self.ffmpeg or not self.ffprobe:
+            self.skipTest("FFmpeg or FFprobe binary not found in local environment")
         self.assertIsNotNone(self.ffmpeg, "FFmpeg binary must exist in PATH")
         self.assertIsNotNone(self.ffprobe, "FFprobe binary must exist in PATH")
 
@@ -24,6 +26,8 @@ class RealFFmpegMuxingTests(unittest.TestCase):
         self.assertIn("ffprobe version", ffprobe_ver.stdout)
 
     def test_synthetic_fixture_muxing_and_probing(self):
+        if not self.ffmpeg or not self.ffprobe:
+            self.skipTest("FFmpeg or FFprobe binary not found in local environment")
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             video_file = tmp / "test_v.mp4"

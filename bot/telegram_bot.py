@@ -40,6 +40,21 @@ class JobResultError(RuntimeError):
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
+def _redact_chat_id(cid: Any) -> str:
+    s = str(cid or "")
+    if len(s) > 4:
+        return f"***{s[-4:]}"
+    return "***"
+
+
+def _redact_url(url_str: str) -> str:
+    try:
+        p = urlparse(url_str)
+        return f"{p.scheme}://{p.netloc}{p.path}"
+    except Exception:
+        return "[REDACTED_URL]"
+
+
 def _extract_url(text: str) -> str | None:
     """استخراج رابط الـ URL الحقيقي بدقة وتنظيفه من النصوص والرموز الصينية الملتصقة به"""
     if not text:
@@ -164,8 +179,10 @@ async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
     duration = _positive_int(result.get("duration"))
     width = _positive_int(result.get("width"))
     height = _positive_int(result.get("height"))
+    job_id = result.get("job_id", "")
+    redacted_cid = _redact_chat_id(chat_id)
 
-    # ── Send analysis report text first ───────────────────────
+    # ── Step 8: Send analysis report text first ───────────────────────
     report_text = result.get("report_text")
     if report_text and isinstance(report_text, list):
         for part in report_text:
@@ -178,8 +195,9 @@ async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
                     )
                 except TelegramError as exc:
                     logger.warning("Failed to send report part: %s", exc)
+        logger.info("TELEGRAM_REPORT_SENT job_id=%s chat_id=%s parts=%d", job_id, redacted_cid, len(report_text))
 
-    # ── Send media file ───────────────────────────────────────
+    # ── Step 9 & 10: Send media file ──────────────────────────────────
     caption = "✅ اكتمل التحميل"
 
     if media_type == "video":
@@ -194,13 +212,12 @@ async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
                 thumbnail=thumbnail,
                 supports_streaming=True,
             )
-            return
-        except BadRequest as exc:
+            logger.info("TELEGRAM_VIDEO_SENT job_id=%s chat_id=%s", job_id, redacted_cid)
+        except (BadRequest, TelegramError) as exc:
             logger.warning("sendVideo rejected result; falling back to document: %s", exc)
             await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
-            return
-
-    if media_type == "audio":
+            logger.info("TELEGRAM_VIDEO_SENT job_id=%s chat_id=%s (fallback_document)", job_id, redacted_cid)
+    elif media_type == "audio":
         try:
             await context.bot.send_audio(
                 chat_id=chat_id,
@@ -209,13 +226,39 @@ async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
                 duration=duration,
                 thumbnail=thumbnail,
             )
-            return
+            logger.info("TELEGRAM_AUDIO_SENT job_id=%s chat_id=%s", job_id, redacted_cid)
         except TelegramError as exc:
             logger.warning("sendAudio failed; falling back to document: %s", exc)
             await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
-            return
+    else:
+        await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
+        logger.info("TELEGRAM_VIDEO_SENT job_id=%s chat_id=%s", job_id, redacted_cid)
 
-    await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
+    # ── Step 11: Send UTF-8 analysis file <video_filename>.analysis.txt ──
+    if report_text and isinstance(report_text, list):
+        try:
+            filename = result.get("filename")
+            if not filename and isinstance(media_source, Path):
+                filename = media_source.name
+            if not filename:
+                filename = "video.mp4"
+            base_name = Path(filename).stem
+            analysis_filename = f"{base_name}.analysis.txt"
+            analysis_bytes = "\n\n".join(report_text).encode("utf-8")
+            from io import BytesIO
+            doc_stream = BytesIO(analysis_bytes)
+            doc_stream.name = analysis_filename
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=doc_stream,
+                filename=analysis_filename,
+                caption=f"📄 تقرير التحليل: {analysis_filename}",
+            )
+            logger.info("TELEGRAM_TEXT_FILE_SENT job_id=%s filename=%s", job_id, analysis_filename)
+        except Exception as file_exc:
+            logger.warning("Failed to send analysis text document: %s", file_exc)
+
+    logger.info("JOB_COMPLETED job_id=%s", job_id)
 
 
 async def wait_and_send_result(
@@ -237,20 +280,23 @@ async def wait_and_send_result(
                 await asyncio.sleep(poll_interval_seconds)
                 continue
 
-            if status == "done":
+            if status in {"done", "completed"}:
                 result = await asyncio.to_thread(get_job_result, job_id)
                 if result.get("status") == "pending":
                     await asyncio.sleep(poll_interval_seconds)
                     continue
+                result["job_id"] = job_id
                 await _send_result_media(context, chat_id, result)
-                logger.info("Delivered result for job %s to chat %s", job_id, chat_id)
+                logger.info("Delivered result for job %s to chat %s", job_id, _redact_chat_id(chat_id))
                 return
 
-            if status == "error":
-                logger.error("Download job %s failed: %s", job_id, job.get("error"))
+            if status in {"error", "failed"}:
+                err_text = str(job.get("error") or "")
+                err_type = "ExtractionFailed" if "extractor" in err_text.lower() else "DownloadFailed"
+                logger.error("Download job %s failed: error_type=%s", job_id, err_type)
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text="❌ فشل تحميل الوسائط. حاول مرة أخرى أو أرسل رابطًا مختلفًا.",
+                    text="تعذر تنزيل هذا الرابط من المنصة حاليًا.",
                 )
                 return
 
@@ -275,23 +321,14 @@ async def wait_and_send_result(
                 text = "❌ تعذر استلام نتيجة التحميل."
             await context.bot.send_message(chat_id=chat_id, text=text)
             return
-        except requests.RequestException as exc:
-            logger.warning("Polling job %s failed temporarily: %s", job_id, exc)
+        except Exception as exc:
+            logger.error("Error polling result for job %s: %s", job_id, exc)
             await asyncio.sleep(poll_interval_seconds)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Failed to deliver result for job %s", job_id)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ اكتمل التحميل لكن تعذر إرسال الملف. يرجى المحاولة مرة أخرى.",
-            )
-            return
 
-    logger.error("Timed out waiting for job %s after %.1f seconds", job_id, timeout_seconds)
+    logger.error("Timed out waiting for result of job %s (%ss)", job_id, timeout_seconds)
     await context.bot.send_message(
         chat_id=chat_id,
-        text="⌛ استغرقت عملية التحميل وقتًا أطول من المتوقع. يرجى المحاولة مرة أخرى.",
+        text="⏱ انتهت مهلة انتظار تحميل الوسائط. يرجى المحاولة لاحقاً.",
     )
 
 
@@ -313,26 +350,33 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if message is None or not message.text:
         return
 
-    user = update.effective_user
     chat_id = message.chat_id
-    username = f"@{user.username}" if user and user.username else (user.first_name if user else f"ChatID:{chat_id}")
-    raw_text = message.text.strip().replace("\n", " ")
-    snippet = raw_text[:100] + ("..." if len(raw_text) > 100 else "")
-    logger.info(f"📩 [Telegram] Message from {username} (ChatID: {chat_id}): \"{snippet}\"")
+    redacted_cid = _redact_chat_id(chat_id)
+    logger.info("TELEGRAM_UPDATE_RECEIVED update_id=%s chat_id=%s", update.update_id, redacted_cid)
+
+    # Redis idempotency check
+    from job_queue.connection import get_redis_connection
+    redis_conn = get_redis_connection()
+    if redis_conn is not None:
+        try:
+            key = f"media:telegram_update:{update.update_id}"
+            if not redis_conn.set(key, "1", nx=True, ex=86400):
+                logger.info("Duplicate telegram update %s skipped", update.update_id)
+                return
+        except Exception as exc:
+            logger.warning("Redis idempotency check failed: %s", exc)
 
     url = _extract_url(message.text)
     if not url:
-        logger.warning(f"⚠️ [Telegram] Invalid URL or plain text from {username} (ChatID: {chat_id}): \"{snippet}\"")
         err_msg = await message.reply_text("❌ الرجاء إرسال رابط صحيح يبدأ بـ http/https")
         await asyncio.sleep(4)
         await _safe_delete(context, message.chat_id, message.message_id)
         await _safe_delete(context, message.chat_id, err_msg.message_id)
         return
 
-    logger.info(f"🔗 [Telegram] Extracted URL: {url} from {username}")
     try:
         job_id = await asyncio.to_thread(send_job, url, message.chat_id)
-        logger.info(f"✅ [Telegram] Job enqueued successfully: ID={job_id} for user {username}")
+        logger.info("JOB_ENQUEUED job_id=%s url=%s", job_id, _redact_url(url))
         await message.reply_text(f"📥 تم إنشاء المهمة: {job_id}")
         context.application.create_task(
             wait_and_send_result(
