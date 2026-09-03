@@ -7,6 +7,8 @@ from pathlib import Path
 from core.cache import create_cache
 from core.config import MEDIA_STORAGE_DRIVER
 from core.metadata import generate_video_thumbnail, get_video_metadata
+from core.video_analyzer import analyze_video
+from core.report_formatter import format_analysis_report
 from engine.classifier import classify
 from engine.media_engine import MediaJob, _to_media_type
 from job_queue.job_store import mark_done, mark_error, mark_running
@@ -59,6 +61,21 @@ async def execute_download(
         except Exception as meta_exc:
             logger.error("Metadata/thumbnail failed for job %s: %s", job_id, meta_exc)
 
+        # ── Video analysis ────────────────────────────────────
+        analysis: dict | None = None
+        report_text: list[str] | None = None
+        try:
+            mark_running(job_id, text="📊 جاري تحليل بيانات الفيديو...", progress=85.0)
+            analysis = await asyncio.to_thread(analyze_video, path)
+            if analysis and "error" not in analysis:
+                report_text = format_analysis_report(analysis)
+                logger.info("Video analysis completed for job %s", job_id)
+            else:
+                logger.warning("Video analysis returned error for job %s: %s",
+                               job_id, analysis.get("error") if analysis else "None")
+        except Exception as analysis_exc:
+            logger.error("Video analysis failed for job %s: %s", job_id, analysis_exc)
+
         storage_key: str | None = None
         thumbnail_storage_key: str | None = None
         result_file = str(path.resolve())
@@ -83,6 +100,8 @@ async def execute_download(
             thumbnail=thumbnail if MEDIA_STORAGE_DRIVER != "s3" else None,
             storage_key=storage_key,
             thumbnail_storage_key=thumbnail_storage_key,
+            analysis=analysis,
+            report_text=report_text,
         )
         mark_done(job_id)
         completed = True

@@ -164,6 +164,22 @@ async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
     duration = _positive_int(result.get("duration"))
     width = _positive_int(result.get("width"))
     height = _positive_int(result.get("height"))
+
+    # ── Send analysis report text first ───────────────────────
+    report_text = result.get("report_text")
+    if report_text and isinstance(report_text, list):
+        for part in report_text:
+            if part and part.strip():
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=part,
+                        parse_mode=None,  # plain text for technical data
+                    )
+                except TelegramError as exc:
+                    logger.warning("Failed to send report part: %s", exc)
+
+    # ── Send media file ───────────────────────────────────────
     caption = "✅ اكتمل التحميل"
 
     if media_type == "video":

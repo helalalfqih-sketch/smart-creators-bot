@@ -33,6 +33,8 @@ def save_result(
     thumbnail: str | None = None,
     storage_key: str | None = None,
     thumbnail_storage_key: str | None = None,
+    analysis: dict[str, Any] | None = None,
+    report_text: list[str] | None = None,
 ) -> dict[str, Any]:
     record = {
         "job_id": job_id,
@@ -44,6 +46,8 @@ def save_result(
         "thumbnail": thumbnail,
         "storage_key": storage_key,
         "thumbnail_storage_key": thumbnail_storage_key,
+        "analysis": analysis,
+        "report_text": report_text,
         "completed_at": _now_iso(),
     }
 

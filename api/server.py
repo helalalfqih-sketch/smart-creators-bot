@@ -212,6 +212,8 @@ def _build_result_response(job_id: str, job: dict, result: dict | None) -> JobRe
             height=_to_int(result.get("height")),
             thumbnail=result.get("thumbnail"),
             completed_at=result.get("completed_at"),
+            analysis=result.get("analysis"),
+            report_text=result.get("report_text"),
         )
     return JobResultResponse(
         job_id=job_id,

@@ -47,7 +47,7 @@ env/
 .env/
 
 ### Project specific ###
-# .env  ← now committed so Railway can load it via python-dotenv
+.env
 downloads/
 *.log
 assets/cookies/*.txt

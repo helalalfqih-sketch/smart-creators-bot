@@ -29,6 +29,8 @@ class JobResultResponse(BaseModel):
     height: int = 0
     thumbnail: str | None = None
     completed_at: str | None = None
+    analysis: dict | None = None
+    report_text: list[str] | None = None
 
 
 class JobFullResponse(BaseModel):
