@@ -57,3 +57,6 @@ assets/cookies/*.txt
 *.mkv
 *.m4a
 *.part
+frontend/node_modules/
+!frontend/dist/
+!frontend/dist/**
