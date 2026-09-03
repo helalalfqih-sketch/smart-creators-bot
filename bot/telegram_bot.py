@@ -30,6 +30,8 @@ logger = logging.getLogger("bot")
 API_REQUEST_TIMEOUT_SECONDS = 30
 RESULT_POLL_INTERVAL_SECONDS = 2
 RESULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("TELEGRAM_RESULT_TIMEOUT_SECONDS", "300"))
+RECENT_URL_DEDUP_SECONDS = int(os.getenv("TELEGRAM_RECENT_URL_DEDUP_SECONDS", "30"))
+_recent_url_claims: dict[str, float] = {}
 
 
 class JobResultError(RuntimeError):
@@ -132,6 +134,31 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _claim_recent_url(chat_id: int, normalized_url: str) -> bool:
+    """Claim a URL briefly to suppress duplicate user messages in one burst."""
+    import time
+
+    key = f"{chat_id}:{normalized_url}"
+    now = time.monotonic()
+    for stale_key, claimed_at in list(_recent_url_claims.items()):
+        if now - claimed_at >= RECENT_URL_DEDUP_SECONDS:
+            _recent_url_claims.pop(stale_key, None)
+    if key in _recent_url_claims:
+        return False
+
+    from job_queue.connection import get_redis_connection
+    redis_conn = get_redis_connection()
+    if redis_conn is not None:
+        redis_key = f"media:telegram_recent_url:{key}"
+        try:
+            if not redis_conn.set(redis_key, "1", nx=True, ex=RECENT_URL_DEDUP_SECONDS):
+                return False
+        except Exception as exc:
+            logger.warning("Recent URL idempotency check unavailable: %s", type(exc).__name__)
+    _recent_url_claims[key] = now
+    return True
 
 
 # ── API Gateway ───────────────────────────────────────────────────────────────
@@ -351,10 +378,16 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _safe_delete(context, message.chat_id, err_msg.message_id)
         return
 
+    # Claim before sending any user-facing progress message so duplicate bursts
+    # remain silent and cannot create duplicate jobs.
+    norm_url = normalize_media_url(url)
+    if not _claim_recent_url(chat_id, norm_url):
+        logger.info("Duplicate recent Telegram URL skipped")
+        return
+
     await message.reply_text("⏳ جارٍ تحميل وتجهيز الفيديو بأعلى جودة...")
 
     # P0-3: Check if an active download already exists for this normalized URL
-    norm_url = normalize_media_url(url)
     existing_job_id = get_active_job_for_url(norm_url)
     if existing_job_id:
         logger.info("JOB_DEDUPLICATED original_job_id=%s", existing_job_id)

@@ -131,9 +131,6 @@ class TelegramDeliveryTests(unittest.IsolatedAsyncioTestCase):
             context.bot.send_document.assert_called_once()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
     async def test_send_video_timeout_falls_back_to_document(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
             context = MagicMock()
@@ -173,6 +170,13 @@ if __name__ == "__main__":
                 await telegram_bot._send_result_media(context, 123456, result)
             self.assertNotIn("caption", context.bot.send_video.call_args.kwargs)
             context.bot.send_message.assert_not_called()
+
+    def test_recent_url_claim_is_idempotent_per_chat_and_url(self):
+        telegram_bot._recent_url_claims.clear()
+        self.assertTrue(telegram_bot._claim_recent_url(5660048569, "https://example.com/video"))
+        self.assertFalse(telegram_bot._claim_recent_url(5660048569, "https://example.com/video"))
+        self.assertTrue(telegram_bot._claim_recent_url(5660048569, "https://example.com/other"))
+        self.assertTrue(telegram_bot._claim_recent_url(100, "https://example.com/video"))
 
 
 if __name__ == "__main__":
