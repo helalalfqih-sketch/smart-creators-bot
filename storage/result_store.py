@@ -33,8 +33,6 @@ def save_result(
     thumbnail: str | None = None,
     storage_key: str | None = None,
     thumbnail_storage_key: str | None = None,
-    analysis: dict[str, Any] | None = None,
-    report_text: list[str] | None = None,
     filename: str | None = None,
 ) -> dict[str, Any]:
     record = {

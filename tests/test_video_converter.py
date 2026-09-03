@@ -100,3 +100,14 @@ class VideoConverterFailureTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VideoConverterAudioTests(unittest.TestCase):
+    def test_incompatible_audio_is_normalized_to_aac_44100_stereo(self):
+        value = VideoProbe(3840, 2160, 60, "hevc", "yuv420p", "mp4", True, 1, "opus", 48000, 2)
+        command = build_ffmpeg_command(Path("in.mp4"), Path("out.mp4"), value)
+        self.assertIn("-c:a", command)
+        self.assertEqual(command[command.index("-c:a") + 1], "aac")
+        self.assertEqual(command[command.index("-ar") + 1], "44100")
+        self.assertEqual(command[command.index("-ac") + 1], "2")
+        self.assertNotIn("-c", command)

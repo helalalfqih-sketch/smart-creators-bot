@@ -140,8 +140,6 @@ async def execute_download(
             thumbnail=thumbnail if MEDIA_STORAGE_DRIVER != "s3" else None,
             storage_key=storage_key,
             thumbnail_storage_key=thumbnail_storage_key,
-            analysis=None,
-            report_text=None,
             filename=path.name,
         )
         mark_ready(job_id)

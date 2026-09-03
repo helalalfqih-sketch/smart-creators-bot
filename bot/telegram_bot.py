@@ -202,8 +202,8 @@ async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
                 supports_streaming=True,
             )
             logger.info("TELEGRAM_VIDEO_SENT job_id=%s", job_id)
-        except (BadRequest, TelegramError) as exc:
-            logger.warning("sendVideo rejected result; falling back to document: %s", exc)
+        except (BadRequest, TelegramError, asyncio.TimeoutError) as exc:
+            logger.warning("sendVideo rejected result; falling back to document: %s", type(exc).__name__)
             await context.bot.send_document(chat_id=chat_id, document=media_source)
             logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
     elif media_type == "audio":
@@ -351,6 +351,8 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _safe_delete(context, message.chat_id, err_msg.message_id)
         return
 
+    await message.reply_text("⏳ جارٍ تحميل وتجهيز الفيديو بأعلى جودة...")
+
     # P0-3: Check if an active download already exists for this normalized URL
     norm_url = normalize_media_url(url)
     existing_job_id = get_active_job_for_url(norm_url)
@@ -368,7 +370,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         job_id = await asyncio.to_thread(send_job, url, message.chat_id)
         logger.info("JOB_ENQUEUED job_id=%s", job_id)
-        await message.reply_text("⏳ جارٍ تحميل وتجهيز الفيديو بأعلى جودة...")
         context.application.create_task(
             wait_and_send_result(
                 context,

@@ -1,9 +1,9 @@
-"""Safe FFmpeg conversion for the production Telegram delivery pipeline."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import subprocess
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -35,6 +35,9 @@ class VideoProbe:
     container: str
     has_audio: bool
     duration: int
+    audio_codec: str = ""
+    audio_sample_rate: int = 0
+    audio_channels: int = 0
 
 
 def _rate(value: str | None) -> float:
@@ -45,17 +48,23 @@ def _rate(value: str | None) -> float:
 
 
 def probe_video(path: Path) -> VideoProbe:
+    """Probe media internally; probe output is never exposed to Telegram users."""
     command = [
         "ffprobe", "-v", "error", "-show_streams", "-show_format",
         "-of", "json", str(path.resolve()),
     ]
-    result = __import__("subprocess").run(command, capture_output=True, text=True, check=True)
+    result = subprocess.run(command, capture_output=True, text=True, check=True)
     data = json.loads(result.stdout)
     streams = data.get("streams", [])
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
     if not video:
         raise RuntimeError("No video stream")
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     format_data = data.get("format", {})
+    try:
+        audio_rate = int(audio.get("sample_rate") or 0) if audio else 0
+    except (TypeError, ValueError):
+        audio_rate = 0
     return VideoProbe(
         width=int(video.get("width") or 0),
         height=int(video.get("height") or 0),
@@ -63,8 +72,11 @@ def probe_video(path: Path) -> VideoProbe:
         video_codec=str(video.get("codec_name") or ""),
         pixel_format=str(video.get("pix_fmt") or ""),
         container=str(format_data.get("format_name") or ""),
-        has_audio=any(s.get("codec_type") == "audio" for s in streams),
+        has_audio=audio is not None,
         duration=max(0, int(float(format_data.get("duration") or 0))),
+        audio_codec=str(audio.get("codec_name") or "") if audio else "",
+        audio_sample_rate=audio_rate,
+        audio_channels=int(audio.get("channels") or 0) if audio else 0,
     )
 
 
@@ -81,22 +93,36 @@ def _already_at_least_target(probe: VideoProbe) -> bool:
     return _spatial_at_least_target(probe) and probe.fps >= VIDEO_OUTPUT_FPS
 
 
+def _audio_is_output_compatible(probe: VideoProbe) -> bool:
+    # Unknown legacy probe values are treated as compatible for remux decisions;
+    # real ffprobe results populate these fields and force normalization when needed.
+    if not probe.has_audio or not probe.audio_codec:
+        return True
+    return (
+        probe.audio_codec in {"aac", "aac_latm"}
+        and probe.audio_sample_rate == 44100
+        and probe.audio_channels == 2
+    )
+
+
 def _can_remux_only(probe: VideoProbe) -> bool:
     return (
         _already_at_least_target(probe)
         and probe.video_codec in {"hevc", "h265"}
         and probe.pixel_format == "yuv420p"
         and any(name in probe.container for name in ("mp4", "mov"))
+        and _audio_is_output_compatible(probe)
     )
 
 
 def build_ffmpeg_command(input_path: Path, output_path: Path, probe: VideoProbe) -> list[str]:
     base = ["ffmpeg", "-y", "-i", str(input_path.resolve())]
     if _can_remux_only(probe):
-        return base + ["-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-tag:v", "hvc1", "-movflags", "+faststart", str(output_path.resolve())]
+        return base + [
+            "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+            "-tag:v", "hvc1", "-movflags", "+faststart", str(output_path.resolve()),
+        ]
 
-    # Preserve sources above the requested spatial/fps target; only normalize the
-    # codec/container. This deliberately avoids downscaling genuine higher quality.
     filters: list[str] = []
     if not _spatial_at_least_target(probe):
         target_w, target_h = _target_dimensions(probe)
@@ -149,7 +175,7 @@ async def prepare_video(input_path: Path) -> tuple[Path, VideoProbe, bool]:
             _, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=VIDEO_CONVERSION_TIMEOUT_SECONDS
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             process.kill()
             await process.wait()
             output_path.unlink(missing_ok=True)

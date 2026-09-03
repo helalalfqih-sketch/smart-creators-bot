@@ -133,3 +133,47 @@ class TelegramDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    async def test_send_video_timeout_falls_back_to_document(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
+            context = MagicMock()
+            context.bot = MagicMock()
+            context.bot.send_video = AsyncMock(side_effect=telegram_bot.asyncio.TimeoutError())
+            context.bot.send_document = AsyncMock()
+            result = {"file": f.name, "media_type": "video", "duration": 1, "width": 3840, "height": 2160}
+            with patch.object(telegram_bot, "confirm_job_delivery"):
+                await telegram_bot._send_result_media(context, 123456, result)
+            context.bot.send_document.assert_called_once()
+
+    async def test_delivery_confirmation_is_not_called_when_both_sends_fail(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
+            context = MagicMock()
+            context.bot = MagicMock()
+            context.bot.send_video = AsyncMock(side_effect=telegram_bot.BadRequest("rejected"))
+            context.bot.send_document = AsyncMock(side_effect=telegram_bot.BadRequest("rejected"))
+            result = {"file": f.name, "media_type": "video"}
+            with patch.object(telegram_bot, "confirm_job_delivery") as confirm:
+                with self.assertRaises(telegram_bot.BadRequest):
+                    await telegram_bot._send_result_media(context, 123456, result)
+            confirm.assert_not_called()
+
+    async def test_delivery_ignores_all_report_fields(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
+            context = MagicMock()
+            context.bot = MagicMock()
+            context.bot.send_video = AsyncMock()
+            result = {
+                "file": f.name,
+                "media_type": "video",
+                "analysis": {"checksums": {"md5": "secret"}},
+                "report_text": ["technical report"],
+                "analysis_file": "analysis.txt",
+            }
+            with patch.object(telegram_bot, "confirm_job_delivery"):
+                await telegram_bot._send_result_media(context, 123456, result)
+            self.assertNotIn("caption", context.bot.send_video.call_args.kwargs)
+            context.bot.send_message.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
