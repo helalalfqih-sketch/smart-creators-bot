@@ -279,68 +279,36 @@ export class TelegramService {
     if (!cleanToken) return { ok: false, error: 'التوكن غير متوفر' };
 
     // In browser environment, request updates cached by the server daemon to avoid 409 Conflict
-    if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
-      try {
-        const res = await fetch('/api/telegram/recent-updates');
-        if (res.ok) {
-          const data = await res.json();
-          if (data.ok && Array.isArray(data.updates)) {
-            return { ok: true, updates: data.updates.slice(-limit) };
+    if (typeof window !== 'undefined') {
+      if (typeof fetch !== 'undefined') {
+        try {
+          const res = await fetch('/api/telegram/recent-updates');
+          if (res.ok) {
+            const data = await res.json();
+            if (data.ok && Array.isArray(data.updates)) {
+              return { ok: true, updates: data.updates.slice(-limit) };
+            }
           }
-        }
-      } catch {}
-    }
-
-    // If live listener already holds updates in memory, return them immediately without network contention
-    if (!forceNetwork && this.recentUpdatesBuffer.length > 0) {
+        } catch {}
+      }
       return { ok: true, updates: [...this.recentUpdatesBuffer].slice(-limit) };
     }
 
     try {
-      // Use timeout=0 for instant querying without locking Telegram long-polling socket
-      const url = `https://api.telegram.org/bot${cleanToken}/getUpdates?limit=${limit}&timeout=0`;
+      const url = `https://api.telegram.org/bot${cleanToken}/getUpdates?timeout=30${forceNetwork ? '&offset=-' + limit : ''}`;
       const response = await fetch(url);
       const data = await response.json();
 
       if (data.ok && Array.isArray(data.result)) {
-        if (data.result.length > 0) {
-          // Merge to buffer
-          data.result.forEach((u: TelegramUpdate) => {
-            if (!this.recentUpdatesBuffer.some((item) => item.update_id === u.update_id)) {
-              this.recentUpdatesBuffer.push(u);
-            }
-          });
-          if (this.recentUpdatesBuffer.length > 60) {
-            this.recentUpdatesBuffer = this.recentUpdatesBuffer.slice(-60);
-          }
-        }
-        return { ok: true, updates: data.result };
+        return { ok: true, updates: data.result.slice(-limit) };
       }
 
-      // If webhook or polling conflict occurs, return local buffer if available or retry once
-      if (data.error_code === 409 || (data.description && data.description.includes('terminated by other getUpdates'))) {
-        if (this.recentUpdatesBuffer.length > 0) {
-          return { ok: true, updates: [...this.recentUpdatesBuffer].slice(-limit) };
-        }
-        // Small delay and retry with timeout=0
-        await new Promise((r) => setTimeout(r, 600));
-        const retryRes = await fetch(url);
-        const retryData = await retryRes.json();
-        if (retryData.ok && Array.isArray(retryData.result)) {
-          return { ok: true, updates: retryData.result };
-        }
-        if (this.recentUpdatesBuffer.length > 0) {
-          return { ok: true, updates: [...this.recentUpdatesBuffer].slice(-limit) };
-        }
-      }
-
-      // If webhook exists, clear webhook automatically
       if (data.error_code === 409 && data.description?.includes('webhook')) {
         await this.deleteWebhook(cleanToken, false);
         const retryRes = await fetch(url);
         const retryData = await retryRes.json();
         if (retryData.ok && Array.isArray(retryData.result)) {
-          return { ok: true, updates: retryData.result };
+          return { ok: true, updates: retryData.result.slice(-limit) };
         }
       }
 

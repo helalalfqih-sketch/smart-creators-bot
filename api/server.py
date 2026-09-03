@@ -485,6 +485,28 @@ async def api_daemon_status():
     return {"ok": True, "running": running, "isRunning": running, "status": "running" if running else "stopped"}
 
 
+@app.get("/api/telegram/recent-updates", include_in_schema=False)
+async def api_telegram_recent_updates(limit: int = 20):
+    """Safely return recent Telegram messages processed by the server without triggering 409 Conflict."""
+    from job_queue.job_store import list_jobs
+    recent = list_jobs(limit=limit)
+    updates = []
+    for j in recent:
+        chat_id = j.get("chat_id")
+        if chat_id:
+            updates.append({
+                "update_id": abs(hash(j["job_id"])) % 10000000,
+                "message": {
+                    "message_id": 1,
+                    "chat": {"id": chat_id, "first_name": "User"},
+                    "from": {"id": chat_id, "first_name": "User"},
+                    "text": j.get("url", ""),
+                    "date": int(time.time()),
+                },
+            })
+    return {"ok": True, "updates": updates}
+
+
 @app.post("/api/telegram/toggle-daemon", include_in_schema=False)
 async def api_toggle_daemon(body: dict | None = None):
     global _bot_proc
