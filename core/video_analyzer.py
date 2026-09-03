@@ -133,6 +133,54 @@ def _format_channels(channels: int, layout: str | None = None) -> str:
     return f"{channels} قنوات"
 
 
+def _analyze_audio_loudness(path: str) -> dict[str, str]:
+    """Analyze audio loudness (LUFS, LRA, True Peak) using ffmpeg ebur128 filter."""
+    result = {
+        "integrated_loudness": "غير محدد",
+        "loudness_range": "غير محدد",
+        "true_peak": "غير محدد",
+    }
+    cmd = [
+        "ffmpeg", "-v", "info", "-i", path,
+        "-af", "ebur128=framelog=verbose",
+        "-f", "null", "-",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=90,
+            encoding="utf-8", errors="replace",
+        )
+        import re
+        i_match = re.search(r"Integrated loudness:\s+I:\s+([-\d.]+)\s+LUFS", proc.stderr)
+        if i_match:
+            result["integrated_loudness"] = f"{i_match.group(1)} LUFS"
+
+        lra_match = re.search(r"Loudness range:\s+LRA:\s+([-\d.]+)\s+LU", proc.stderr)
+        if lra_match:
+            result["loudness_range"] = f"{lra_match.group(1)} LU"
+
+        tp_match = re.search(r"True peak:\s+Peak:\s+([-\d.]+)\s+dBFS", proc.stderr)
+        if tp_match:
+            result["true_peak"] = f"{tp_match.group(1)} dBFS"
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("Audio loudness analysis failed: %s", exc)
+    return result
+
+
+def _format_yemen_time(iso_time: str | None) -> str:
+    """Convert UTC ISO timestamp to Yemen time (UTC+3)."""
+    if not iso_time:
+        return "غير موجود"
+    try:
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
+        yemen_tz = timezone(timedelta(hours=3))
+        yemen_dt = dt.astimezone(yemen_tz)
+        return yemen_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "غير محدد"
+
+
 def _check_integrity(path: str) -> dict[str, str]:
     """Check container and stream integrity using ffmpeg decode test."""
     result_dict: dict[str, str] = {
@@ -398,6 +446,13 @@ def analyze_video(path: Path | str) -> dict[str, Any]:
         atags = aus.get("tags", {})
         report["audio"]["handler_name"] = atags.get("handler_name")
         report["audio"]["language"] = atags.get("language")
+
+        # Audio loudness (LUFS, LRA, True Peak)
+        loudness = _analyze_audio_loudness(path_str)
+        report["audio"].update(loudness)
+
+    # ── Yemen time ────────────────────────────────────────────────
+    report["yemen_time"] = _format_yemen_time(report.get("creation_time"))
 
     # ── Frame analysis ────────────────────────────────────────────
     frame_analysis = _get_frame_analysis(path_str)

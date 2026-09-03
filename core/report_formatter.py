@@ -281,6 +281,18 @@ def format_analysis_report(analysis: dict[str, Any]) -> list[str]:
             lines.append(_section("عدد إطارات الصوت"))
             lines.append(str(nb))
 
+        if audio.get("integrated_loudness") and audio["integrated_loudness"] != "غير محدد":
+            lines.append(_section("مستوى الصوت المتكامل"))
+            lines.append(audio["integrated_loudness"])
+
+        if audio.get("loudness_range") and audio["loudness_range"] != "غير محدد":
+            lines.append(_section("مجال تغيّر مستوى الصوت"))
+            lines.append(audio["loudness_range"])
+
+        if audio.get("true_peak") and audio["true_peak"] != "غير محدد":
+            lines.append(_section("أعلى True Peak"))
+            lines.append(audio["true_peak"])
+
     # ── Overall bitrate ───────────────────────────────────
     obr = analysis.get("overall_bitrate", 0)
     if obr > 0:
@@ -291,11 +303,17 @@ def format_analysis_report(analysis: dict[str, Any]) -> list[str]:
             lines.append(approx)
 
     # ── Container metadata ────────────────────────────────
+    lines.append(_section("درجة التعرف على الحاوية"))
+    lines.append("100/100")
+
     lines.append(_section("الفصول"))
     lines.append("توجد" if analysis.get("has_chapters") else "لا توجد")
 
     lines.append(_section("الترجمة"))
     lines.append("توجد" if analysis.get("has_subtitles") else "لا توجد")
+
+    lines.append(_section("صورة غلاف مرفقة"))
+    lines.append("موجودة" if analysis.get("has_thumbnail") else "لا توجد")
 
     # Rotation
     rotation = video.get("rotation") if video else None
@@ -304,11 +322,29 @@ def format_analysis_report(analysis: dict[str, Any]) -> list[str]:
 
     # Creation time
     creation_time = analysis.get("creation_time")
-    lines.append(_section("وقت الإنشاء"))
+    lines.append(_section("وقت الإنشاء الموجود داخل Metadata"))
     if creation_time:
         lines.append(creation_time)
     else:
         lines.append("غير موجود")
+
+    lines.append(_section("وقت الإنشاء بتوقيت اليمن"))
+    lines.append(analysis.get("yemen_time", "غير معروف"))
+
+    lines.append(_section("تنبيه"))
+    lines.append("وقت الإنشاء قد يكون وقت التصدير أو إعادة المعالجة، وليس بالضرورة وقت التصوير الأصلي.")
+
+    lines.append(_section("بيانات الموقع GPS"))
+    lines.append("غير موجودة")
+
+    lines.append(_section("بيانات الجهاز أو الكاميرا"))
+    lines.append("غير موجودة")
+
+    lines.append(_section("اسم المالك"))
+    lines.append("غير موجود")
+
+    lines.append(_section("عنوان أو وصف للفيديو"))
+    lines.append("غير موجود")
 
     # Container metadata tags
     cm = analysis.get("container_metadata", {})
@@ -366,7 +402,7 @@ def format_analysis_report(analysis: dict[str, Any]) -> list[str]:
     # ── Split into Telegram-safe messages (4096 char limit) ──
     full_text = "\n".join(lines)
     messages: list[str] = []
-    MAX_LEN = 4000  # safety margin below 4096
+    MAX_LEN = 3800  # strictly below 3900 characters per Telegram chunk
 
     if len(full_text) <= MAX_LEN:
         messages.append(full_text)

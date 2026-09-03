@@ -70,6 +70,12 @@ async def execute_download(
             if analysis and "error" not in analysis:
                 report_text = format_analysis_report(analysis)
                 logger.info("Video analysis completed for job %s", job_id)
+                # Create analysis.txt file alongside the downloaded media
+                try:
+                    analysis_file = path.with_name("analysis.txt")
+                    analysis_file.write_text("\n\n".join(report_text), encoding="utf-8")
+                except Exception as file_err:
+                    logger.warning("Could not write analysis.txt: %s", file_err)
             else:
                 logger.warning("Video analysis returned error for job %s: %s",
                                job_id, analysis.get("error") if analysis else "None")
@@ -119,6 +125,7 @@ async def execute_download(
         if MEDIA_STORAGE_DRIVER == "s3":
             if path is not None:
                 path.unlink(missing_ok=True)
+                path.with_name("analysis.txt").unlink(missing_ok=True)
             if thumbnail:
                 Path(thumbnail).unlink(missing_ok=True)
             if not completed:
