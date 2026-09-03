@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 from urllib.parse import urlparse
 
 from logging.handlers import RotatingFileHandler
@@ -196,14 +196,20 @@ def _build_status_response(job: dict) -> JobStatusResponse:
 
 def _build_result_response(job_id: str, job: dict, result: dict | None) -> JobResultResponse:
     if result:
+        def _to_int(val: Any) -> int:
+            try:
+                return int(float(val or 0))
+            except (ValueError, TypeError):
+                return 0
+
         return JobResultResponse(
             job_id=job_id,
             status=job.get("status", JobStatus.DONE.value),
             media_type=result.get("media_type"),
             file=result.get("file"),
-            duration=result.get("duration", 0),
-            width=result.get("width", 0),
-            height=result.get("height", 0),
+            duration=_to_int(result.get("duration")),
+            width=_to_int(result.get("width")),
+            height=_to_int(result.get("height")),
             thumbnail=result.get("thumbnail"),
             completed_at=result.get("completed_at"),
         )
@@ -276,7 +282,12 @@ async def get_job_result(job_id: str):
             detail={"message": "Result not ready", "status": status},
         )
 
-    result = await asyncio.to_thread(get_result, job_id)
+    try:
+        result = await asyncio.to_thread(get_result, job_id)
+    except Exception as exc:
+        logger.error(f"Error fetching result for job {job_id}: {exc}", exc_info=True)
+        result = None
+
     if result is None:
         raise HTTPException(status_code=404, detail="Result not found")
 
