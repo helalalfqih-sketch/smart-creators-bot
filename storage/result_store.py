@@ -77,15 +77,17 @@ def get_result(job_id: str) -> dict[str, Any] | None:
 
 def _with_fresh_signed_urls(record: dict[str, Any]) -> dict[str, Any]:
     hydrated = dict(record)
-    try:
-        if hydrated.get("storage_key"):
-            hydrated["file"] = create_signed_download_url(hydrated["storage_key"])
-        if hydrated.get("thumbnail_storage_key"):
-            hydrated["thumbnail"] = create_signed_download_url(
-                hydrated["thumbnail_storage_key"]
-            )
-    except Exception as exc:
-        logger.warning("Could not generate presigned S3 URL for job: %s", exc)
+    driver = os.getenv("MEDIA_STORAGE_DRIVER", "").strip().lower()
+    if driver == "s3":
+        try:
+            if hydrated.get("storage_key"):
+                hydrated["file"] = create_signed_download_url(hydrated["storage_key"])
+            if hydrated.get("thumbnail_storage_key"):
+                hydrated["thumbnail"] = create_signed_download_url(
+                    hydrated["thumbnail_storage_key"]
+                )
+        except Exception as exc:
+            logger.debug("Could not generate presigned S3 URL for job: %s", exc)
     return hydrated
 
 

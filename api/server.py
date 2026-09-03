@@ -699,6 +699,11 @@ async def api_db_all_compatibility():
     return {"users": [], "history": [], "settings": {}}
 
 
+# ── Downloaded Media & Thumbnails Serving ───────────────────────────────────────
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/downloads", StaticFiles(directory=str(DOWNLOAD_DIR)), name="downloads")
+app.mount("/app/downloads", StaticFiles(directory=str(DOWNLOAD_DIR)), name="app_downloads")
+
 # ── Frontend Dashboard (React + Vite) ──────────────────────────────────────────
 _frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _frontend_dist.exists():
