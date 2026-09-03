@@ -374,7 +374,28 @@ export class EngineService {
     this.jobs.set(jobId, job);
     this.addLog('INFO', `[${jobId}] تم استلام مهمة جديدة للرابط: ${url} (المستخدم: ${chatId})`, 'job_queue.py');
     this.persistState();
-    this.processJob(jobId);
+
+    // Delegate to real Python server backend
+    fetch('/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, quality, chat_id: String(chatId) }),
+    })
+      .then(async (res) => {
+        if (res.ok) {
+          const data = await res.json();
+          if (data.job_id) {
+            this.addLog('INFO', `[${data.job_id}] أرسلت المهمة إلى خادم المعالجة بنجاح`, 'job_queue.py');
+            await this.syncState();
+          }
+        } else {
+          this.processJob(jobId);
+        }
+      })
+      .catch(() => {
+        this.processJob(jobId);
+      });
+
     return jobId;
   }
 

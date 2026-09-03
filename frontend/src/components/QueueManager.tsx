@@ -137,12 +137,21 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
             const urls = TelegramService.extractUrlsFromMessage(msg);
             const sender = msg.from?.username ? `@${msg.from.username}` : msg.from?.first_name || String(msg.chat.id);
             for (const url of urls) {
-              engine.createDownloadJob(url, 'best', msg.chat.id);
-              engine.addLog('INFO', `📥 تم استيراد رابط من رسائل تيليجرام: ${url} من ${sender}`, 'telegram_bot.py');
-              addedCount++;
+              try {
+                await fetch('/api/jobs', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ url, quality: 'best', chat_id: String(msg.chat.id) }),
+                });
+                engine.addLog('INFO', `📥 تم استيراد رابط من تيليجرام وإرساله للسيرفر: ${url} من ${sender}`, 'telegram_bot.py');
+                addedCount++;
+              } catch (e) {
+                console.warn('Failed to enqueue synced URL to server:', e);
+              }
             }
           }
         }
+        await engine.syncState();
         onRefresh();
         if (addedCount > 0) {
           const successMsg = `تم سحب ${addedCount} رابط من تيليجرام بنجاح! 📥`;
