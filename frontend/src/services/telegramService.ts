@@ -80,6 +80,8 @@ export class TelegramService {
   private static isPollingActive: boolean = false;
   private static lastUpdateId: number = 0;
   private static processedUpdateIds: Set<number> = new Set();
+  private static recentUrlClaims: Map<string, number> = new Map();
+  private static readonly RECENT_URL_DEDUP_MS = 30_000;
   private static isListening: boolean = false;
   private static currentPollingToken: string = '';
   private static recentUpdatesBuffer: TelegramUpdate[] = [];
@@ -92,6 +94,17 @@ export class TelegramService {
 
   public static getConnectionStatus(): TelegramConnectionStatus {
     return this.connectionStatus;
+  }
+
+  private static claimRecentUrl(chatId: number, url: string): boolean {
+    const now = Date.now();
+    for (const [key, claimedAt] of this.recentUrlClaims.entries()) {
+      if (now - claimedAt >= this.RECENT_URL_DEDUP_MS) this.recentUrlClaims.delete(key);
+    }
+    const key = `${chatId}:${url.trim().toLowerCase()}`;
+    if (this.recentUrlClaims.has(key)) return false;
+    this.recentUrlClaims.set(key, now);
+    return true;
   }
 
   public static onConnectionStatusChange(cb: (status: TelegramConnectionStatus) => void): () => void {
@@ -623,7 +636,7 @@ export class TelegramService {
     const cleanVideoUrl = videoUrl.replace(/\/playwm\//g, '/play/').replace(/playwm/g, 'play');
 
     try {
-      const statusText = `⏳ <b>جاري التحضير بجودة (${displayQuality})...</b>\n⚡ <i>يرجى الانتظار، جاري معالجة ورفع الفيديو بدون علامة مائية مباشرة...</i>`;
+      const statusText = '🎬 جارٍ تجهيز نسخة 4K بمعدل 60 إطارًا...';
 
       // 1. Show interactive status message indicating selected quality before upload
       if (tempStatusMsgId) {
@@ -657,14 +670,11 @@ export class TelegramService {
       const payload: any = {
         chat_id: chatId,
         video: cleanVideoUrl,
-        caption: caption || '',
-        parse_mode: 'HTML',
+        // Media-only delivery: do not expose technical captions or report metadata.
+        caption: '',
         supports_streaming: true,
         thumbnail: thumbUrl,
       };
-      if (replyMarkup) {
-        payload.reply_markup = replyMarkup;
-      }
 
       let response = await fetch(`https://api.telegram.org/bot${cleanToken}/sendVideo`, {
         method: 'POST',
@@ -761,13 +771,10 @@ export class TelegramService {
       const payload: any = {
         chat_id: chatId,
         document: documentUrl,
-        caption: caption || '',
-        parse_mode: 'HTML',
+        // Media-only fallback: do not expose captions or report metadata.
+        caption: '',
         thumbnail: thumbUrl,
       };
-      if (replyMarkup) {
-        payload.reply_markup = replyMarkup;
-      }
 
       let response = await fetch(`https://api.telegram.org/bot${cleanToken}/sendDocument`, {
         method: 'POST',
@@ -793,11 +800,8 @@ export class TelegramService {
               const formData = new FormData();
               formData.append('chat_id', String(chatId));
               formData.append('document', docBlob, `media_file.${ext}`);
-              if (caption) formData.append('caption', caption);
-              formData.append('parse_mode', 'HTML');
-              if (replyMarkup) {
-                formData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
-              }
+              // No caption or report metadata on binary fallback uploads.
+
 
               const docStreamRes = await fetch(`https://api.telegram.org/bot${cleanToken}/sendDocument`, {
                 method: 'POST',
@@ -960,11 +964,6 @@ export class TelegramService {
           const formData = new FormData();
           formData.append('chat_id', String(chatId));
           formData.append('photo', blob, 'comparison_preview.jpg');
-          if (caption) formData.append('caption', caption);
-          formData.append('parse_mode', 'HTML');
-          if (replyMarkup) {
-            formData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
-          }
 
           const response = await fetch(`https://api.telegram.org/bot${cleanToken}/sendPhoto`, {
             method: 'POST',
@@ -2252,7 +2251,7 @@ export class TelegramService {
                   const replyRes = await this.sendMessage(
                     cleanToken,
                     chatId,
-                    `🔓 <b>جاري فك تشفير وتجاوز حماية الوسائط...</b>\n\n🎬 <b>المقطع:</b> ${this.escapeHtml(videoTitle)}\n🔗 <a href="${this.escapeHtml(videoUrlToDecrypt)}">رابط المصدر</a>\n\n⚡ <i>يرجى الانتظار ثوانٍ معدودة لتجاوز الجدار الناري...</i>`
+                    '⏳ جارٍ تحميل وتجهيز الفيديو بأعلى جودة...'
                   ).catch(() => ({ ok: false, message: undefined }));
 
                   const replyMsgId = replyRes?.ok && replyRes.message ? replyRes.message.message_id : undefined;
@@ -2269,22 +2268,6 @@ export class TelegramService {
 
                 // Send decrypted video directly to telegram chat
                 const directVideoFile = targetResult?.video_url || resolvedDirectStream || videoUrlToDecrypt;
-                const arabicVideoTitle = await TranslationService.translateToArabic(videoTitle).catch(() => videoTitle);
-                const displayTitle = (arabicVideoTitle && arabicVideoTitle.trim()) ? arabicVideoTitle.trim() : (videoTitle || 'فيديو فائق الجودة');
-
-                const decryptedCaption =
-                  `🎬 <b>${this.escapeHtml(displayTitle)}</b>\n` +
-                  `━━━━━━━━━━━━━━━━━━━━\n` +
-                  `💎 <b>الدقة:</b> 1080p FHD (أعلى نقاء)\n` +
-                  `🛡️ <b>الحالة:</b> بدون علامة مائية (No Watermark) ✅\n\n` +
-                  `🏷️ <b>الوسوم:</b>\n#اكسبلور  #ترند  #فيديو  #reels  #viral`;
-
-                const qualityKeyboard = this.buildQualityInlineKeyboard(
-                  targetKey,
-                  targetResult?.available_qualities,
-                  targetResult?.audio_url
-                );
-
                 if (onLog) onLog(`🚀 إرسال ملف الفيديو المفكوك تشفيره مباشرة إلى محادثة تيليجرام (${chatId})`, 'INFO');
 
                 // 1. Send native MP4 Video File to Telegram Chat
@@ -2292,10 +2275,10 @@ export class TelegramService {
                   cleanToken,
                   chatId,
                   directVideoFile,
-                  decryptedCaption,
+                  undefined,
                   targetResult?.thumbnail,
-                  qualityKeyboard,
-                  '1080p FHD (مفكوك التشفير)',
+                  undefined,
+                  undefined,
                   messageId
                 );
 
@@ -2305,19 +2288,17 @@ export class TelegramService {
                     cleanToken,
                     chatId,
                     directVideoFile,
-                    decryptedCaption,
+                    undefined,
                     targetResult?.thumbnail,
-                    qualityKeyboard
+                    undefined
                   );
 
                   if (!docRes.ok) {
-                    if (targetResult?.thumbnail) {
-                      await this.sendPhoto(cleanToken, chatId, targetResult.thumbnail, decryptedCaption, qualityKeyboard).catch(() => {
-                        this.sendMessage(cleanToken, chatId, decryptedCaption, 'HTML', qualityKeyboard);
-                      });
-                    } else {
-                      await this.sendMessage(cleanToken, chatId, decryptedCaption, 'HTML', qualityKeyboard);
-                    }
+                    await this.sendMessage(
+                      cleanToken,
+                      chatId,
+                      '❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.'
+                    );
                   }
                 } else {
                   if (onLog) onLog(`✅ تم إرسال الفيديو المفكوك تشفيره بنجاح إلى المستخدم (${fromUser})`, 'INFO');
@@ -2517,14 +2498,16 @@ export class TelegramService {
                 const userQuality = userPrefs.default_quality || 'best';
 
                 for (const foundUrl of urls) {
-                  const { cleanUrl, platform } = this.cleanDisplayUrl(foundUrl);
-                  if (onLog) onLog(`📥 تم استقبال رابط جديد من ${sender} (${platform}) [الجودة: ${userQuality}]`, 'INFO');
+                  if (!this.claimRecentUrl(msg.chat.id, foundUrl)) {
+                    onLog?.('Duplicate Telegram URL skipped before job creation', 'INFO');
+                    continue;
+                  }
+                  if (onLog) onLog(`📥 تم استقبال رابط جديد من ${sender}`, 'INFO');
 
-                  // Send clean, compact confirmation reply without dumping massive raw tracking URLs
                   const replyRes = await this.sendMessage(
                     cleanToken,
                     msg.chat.id,
-                    `⏳ <b>جاري التحميل والمعالجة...</b>\n\n📁 <b>المنصة:</b> ${platform}\n🎯 <b>الجودة المختارة:</b> ${userQuality === '4k_enhanced' ? '✨ 4K UHD AI' : userQuality === 'audio' ? '🎵 MP3 Audio' : userQuality}\n🎬 <i>جاري فك التشفير وتجهيز ملف الفيديو المباشر بدون علامة مائية...</i>`
+                    '⏳ جارٍ تحميل وتجهيز الفيديو بأعلى جودة...'
                   ).catch(() => ({ ok: false, message: undefined }));
 
                   const replyMsgId = replyRes?.ok && replyRes.message ? replyRes.message.message_id : undefined;
@@ -3189,11 +3172,15 @@ export class TelegramService {
 
       if (urls.length > 0) {
         for (const targetUrl of urls) {
-          const { cleanUrl, platform } = this.cleanDisplayUrl(targetUrl);
+          if (!this.claimRecentUrl(chatId, targetUrl)) {
+            options?.onLog?.('Duplicate Telegram URL skipped before job creation', 'INFO');
+            continue;
+          }
+
           const replyRes = await this.sendMessage(
             cleanToken,
             chatId,
-            `⏳ <b>جاري التحميل والمعالجة...</b>\n\n📁 <b>المنصة:</b> ${platform}\n🔗 <a href="${cleanUrl}">رابط المقطع المصدر</a>\n\n⚡ <i>جاري فك التشفير واستخراج الوسائط بدون علامة مائية...</i>`
+            '⏳ جارٍ تحميل وتجهيز الفيديو بأعلى جودة...'
           ).catch(() => ({ ok: false, message: undefined }));
 
           const replyMsgId = replyRes?.ok && replyRes.message ? replyRes.message.message_id : undefined;

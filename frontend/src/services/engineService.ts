@@ -8,7 +8,6 @@ import {
   BotUser,
 } from '../types';
 import { MediaExtractorService } from './mediaExtractor';
-import { TranslationService } from './translator';
 import { TelegramService } from './telegramService';
 import { AiVideoEnhancerService } from './aiEnhancer';
 import { DatabaseService } from '../db/database';
@@ -574,25 +573,9 @@ export class EngineService {
           if (token && targetChatId && targetChatId !== 'web-tester') {
             (async () => {
               try {
-                // Caption retains full hashtags, platform identity & Arabic translation
-                const arabicCaption = await TranslationService.formatArabicCaption(
-                  extraction.title,
-                  extraction.platform,
-                  extraction.author,
-                  extraction.duration,
-                  specs.formattedSize,
-                  specs.resolutionLabel
-                );
-
-                const captionText = arabicCaption.length > 1020 ? arabicCaption.substring(0, 1017) + '...' : arabicCaption;
-
-                // Update caption in result
-                const currentRes = this.results.get(jobId);
-                if (currentRes) {
-                  currentRes.caption_text = captionText;
-                  this.results.set(jobId, currentRes);
-                  this.persistState();
-                }
+                // Telegram delivery is intentionally media-only; technical metadata,
+                // source links, hashes, and report captions are not sent to users.
+                const captionText: undefined = undefined;
 
                 // Generate Telegram inline keyboard with callback_data and calculated sizes for instant in-chat quality switching
                 // Keep chat clean by not attaching bulky inline keyboard to media messages (options are in the main menu)
@@ -621,7 +604,7 @@ export class EngineService {
                       await TelegramService.sendMessage(
                         token,
                         targetChatId,
-                        captionText,
+                        '❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.',
                         'HTML',
                         undefined
                       );
@@ -657,22 +640,13 @@ export class EngineService {
                     if (docRes.ok) {
                       this.addLog('INFO', `[${jobId}] ✅ تم إرسال ملف الفيديو كمستند بنجاح (Chat ID: ${targetChatId})`, 'telegram_bot.py');
                     } else {
-                      this.addLog('WARN', `[${jobId}] إرسال بطاقة الفيديو والمعلومات`, 'telegram_bot.py');
-                      let sentCard = false;
-                      if (extraction.thumbnail) {
-                        const photoRes = await TelegramService.sendPhoto(
-                          token,
-                          targetChatId,
-                          extraction.thumbnail,
-                          captionText,
-                          undefined
-                        );
-                        sentCard = Boolean(photoRes?.ok);
-                      }
-
-                      if (!sentCard) {
-                        await TelegramService.sendMessage(token, targetChatId, captionText, 'HTML', undefined);
-                      }
+                      await TelegramService.sendMessage(
+                        token,
+                        targetChatId,
+                        '❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.',
+                        'HTML',
+                        undefined
+                      );
                     }
                   }
                 }
