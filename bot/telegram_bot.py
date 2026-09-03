@@ -485,18 +485,45 @@ def main() -> None:
         write_timeout=120.0,
     )
 
+    import uuid
+    import time
+    from job_queue.connection import get_redis_connection
+
+    instance_id = str(uuid.uuid4())
+    r = None
+    try:
+        r = get_redis_connection()
+    except Exception:
+        pass
+
+    if r is not None:
+        # Acquire leader lock to prevent overlapping polling instances during Render rolling deploys
+        for _ in range(10):
+            try:
+                acquired = r.set("media:telegram:polling_leader", instance_id, nx=True, ex=15)
+                if acquired:
+                    logger.info(f"👑 [Telegram] Polling leader lock acquired ({instance_id[:8]})")
+                    break
+                current_leader = r.get("media:telegram:polling_leader")
+                if current_leader == instance_id:
+                    break
+                logger.info("⏳ [Telegram] Waiting for previous bot instance to hand over polling...")
+                time.sleep(2)
+            except Exception:
+                break
+
     async def _post_init(application: Application) -> None:
         async def _heartbeat_loop():
-            import time
-            from job_queue.connection import get_redis_connection
             while True:
                 try:
-                    r = get_redis_connection()
-                    if r is not None:
-                        r.set("media:bot:polling_heartbeat", str(time.time()), ex=60)
+                    conn = get_redis_connection()
+                    if conn is not None:
+                        conn.set("media:bot:polling_heartbeat", str(time.time()), ex=60)
+                        if conn.get("media:telegram:polling_leader") == instance_id:
+                            conn.expire("media:telegram:polling_leader", 15)
                 except Exception:
                     pass
-                await asyncio.sleep(10)
+                await asyncio.sleep(8)
 
         asyncio.create_task(_heartbeat_loop())
 
@@ -515,7 +542,15 @@ def main() -> None:
     app.add_error_handler(error_handler)
 
     logger.info("🤖 [Telegram] Bot polling started | Real-time Dashboard Sync active")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+    finally:
+        if r is not None:
+            try:
+                if r.get("media:telegram:polling_leader") == instance_id:
+                    r.delete("media:telegram:polling_leader")
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
