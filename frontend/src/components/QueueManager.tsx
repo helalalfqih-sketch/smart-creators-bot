@@ -323,7 +323,7 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
     setItemsToShare(items);
     // Suggest default target chat
     const firstUser = items[0]?.user;
-    if (firstUser && firstUser !== 'API') {
+    if (firstUser && firstUser !== 'API' && firstUser !== 'unknown' && firstUser !== 'anonymous') {
       setTargetChatInput(firstUser);
     } else if (recentChats.length > 0) {
       setTargetChatInput(recentChats[0].id);
@@ -337,14 +337,15 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
   // Execute Share to Telegram Channel or User
   const handleExecuteShare = async () => {
     const cleanTarget = targetChatInput.trim();
-    if (!cleanTarget) {
-      toast.warning('حدد الوجهة', 'يرجى إدخال اسم القناة أو معرف المستخدم أو اختيار من القائمة.');
+    if (!cleanTarget || cleanTarget === 'unknown' || cleanTarget === 'anonymous') {
+      toast.warning('حدد الوجهة', 'يرجى إدخال معرف مستخدم أو قناة صالح (مثال: @channel أو 5660048569).');
       return;
     }
 
     setIsSendingShare(true);
     let successCount = 0;
     let failCount = 0;
+    let lastErrorMsg: string | null = null;
 
     for (let i = 0; i < itemsToShare.length; i++) {
       const item = itemsToShare[i];
@@ -381,11 +382,13 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
           engine.addLog('INFO', `📤 تمت مشاركة الفيديو (${item.id}) بنجاح إلى القناة/المستخدم: ${cleanTarget}`, 'telegram_bot.py');
         } else {
           failCount++;
-          engine.addLog('ERROR', `❌ فشل إرسال الفيديو (${item.id}) إلى ${cleanTarget}: ${resData.description || resData.detail || 'خطأ'}`, 'telegram_bot.py');
+          lastErrorMsg = resData.description || resData.detail || 'تعذر الإرسال';
+          engine.addLog('ERROR', `❌ فشل إرسال الفيديو (${item.id}) إلى ${cleanTarget}: ${lastErrorMsg}`, 'telegram_bot.py');
         }
       } catch (err: any) {
         failCount++;
-        engine.addLog('ERROR', `❌ فشل إرسال الفيديو (${item.id}) إلى ${cleanTarget}: ${err?.message}`, 'telegram_bot.py');
+        lastErrorMsg = err?.message || 'خطأ في الاتصال';
+        engine.addLog('ERROR', `❌ فشل إرسال الفيديو (${item.id}) إلى ${cleanTarget}: ${lastErrorMsg}`, 'telegram_bot.py');
       }
     }
 
@@ -397,7 +400,7 @@ export const QueueManager: React.FC<QueueManagerProps> = ({ queue, onRefresh }) 
       toast.success('تمت المشاركة بنجاح! 🚀', `تم إرسال ${successCount} فيديو إلى (${cleanTarget}) عبر تيليجرام.`);
     }
     if (failCount > 0) {
-      toast.error('حدث خطأ في بعض العناصر', `تعذر إرسال ${failCount} عناصر.`);
+      toast.error('تعذر الإرسال عبر تيليجرام', lastErrorMsg || `تعذر إرسال ${failCount} عناصر.`);
     }
   };
 

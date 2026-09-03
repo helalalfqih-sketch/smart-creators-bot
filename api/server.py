@@ -551,9 +551,9 @@ async def api_telegram_recent_updates(limit: int = 20):
 @app.post("/api/telegram/send-media", include_in_schema=False)
 async def api_telegram_send_media(body: dict):
     """Deliver a video, audio or card message to any Telegram chat/channel using the server's Bot token."""
-    chat_id = body.get("chat_id")
-    if not chat_id:
-        raise HTTPException(status_code=400, detail="chat_id is required")
+    raw_chat_id = str(body.get("chat_id") or "").strip()
+    if not raw_chat_id or raw_chat_id.lower() in {"unknown", "anonymous", "none"}:
+        return {"ok": False, "description": "يرجى تحديد معرف مستخدم أو قناة صالح (مثال: @channel أو 5660048569)"}
 
     media_file = str(body.get("file") or body.get("url") or "").strip()
     caption = str(body.get("caption") or "").strip()
@@ -567,31 +567,58 @@ async def api_telegram_send_media(body: dict):
     async with httpx.AsyncClient(timeout=90.0) as client:
         # Check if media_file is a local file on server disk
         p = Path(media_file) if media_file else None
+        if p and not p.is_file():
+            local_candidate = DOWNLOAD_DIR / p.name
+            if local_candidate.is_file():
+                p = local_candidate
+
         if p and p.is_file():
-            with open(p, "rb") as f:
-                files = {"video": (p.name, f, "video/mp4")} if media_type == "video" else {"document": (p.name, f)}
-                data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-                url = f"https://api.telegram.org/bot{token}/sendVideo" if media_type == "video" else f"https://api.telegram.org/bot{token}/sendDocument"
-                resp = await client.post(url, data=data, files=files)
-                return resp.json()
+            try:
+                with open(p, "rb") as f:
+                    files = {"video": (p.name, f, "video/mp4")} if media_type == "video" else {"document": (p.name, f)}
+                    data = {"chat_id": raw_chat_id, "caption": caption, "parse_mode": "HTML"}
+                    url = f"https://api.telegram.org/bot{token}/sendVideo" if media_type == "video" else f"https://api.telegram.org/bot{token}/sendDocument"
+                    resp = await client.post(url, data=data, files=files)
+                    res_json = resp.json()
+                    if res_json.get("ok"):
+                        return res_json
+            except Exception as e:
+                logger.warning("Local file send error: %s", e)
 
         # Otherwise send via direct URL
         if media_type == "video" and media_file.startswith("http"):
             resp = await client.post(
                 f"https://api.telegram.org/bot{token}/sendVideo",
-                json={"chat_id": chat_id, "video": media_file, "caption": caption, "parse_mode": "HTML"}
+                json={"chat_id": raw_chat_id, "video": media_file, "caption": caption, "parse_mode": "HTML"}
             )
-            return resp.json()
+            res_json = resp.json()
+            if res_json.get("ok"):
+                return res_json
+            # Fallback to sendMessage if remote video URL failed
+            fallback_text = f"{caption}\n\n📥 <b>رابط التنزيل المباشر:</b>\n{media_file}"
+            f_resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": raw_chat_id, "text": fallback_text, "parse_mode": "HTML"}
+            )
+            return f_resp.json()
         elif media_type == "audio" and media_file.startswith("http"):
             resp = await client.post(
                 f"https://api.telegram.org/bot{token}/sendAudio",
-                json={"chat_id": chat_id, "audio": media_file, "caption": caption, "parse_mode": "HTML"}
+                json={"chat_id": raw_chat_id, "audio": media_file, "caption": caption, "parse_mode": "HTML"}
             )
-            return resp.json()
+            res_json = resp.json()
+            if res_json.get("ok"):
+                return res_json
+            fallback_text = f"{caption}\n\n🎵 <b>رابط ملف الصوت:</b>\n{media_file}"
+            f_resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": raw_chat_id, "text": fallback_text, "parse_mode": "HTML"}
+            )
+            return f_resp.json()
         else:
             resp = await client.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": caption or media_file, "parse_mode": "HTML"}
+                json={"chat_id": raw_chat_id, "text": caption or media_file, "parse_mode": "HTML"}
             )
             return resp.json()
 
