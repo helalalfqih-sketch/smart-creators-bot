@@ -282,6 +282,10 @@ async def wait_and_send_result(
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    username = f"@{user.username}" if user and user.username else (user.first_name if user else f"ChatID:{chat_id}")
+    logger.info(f"⚡ [Telegram] Command /start received from {username} (ChatID: {chat_id})")
     await update.effective_message.reply_text(
         "👋 *مرحباً!*\n\nأرسل الروابط مباشرة وسأقوم بتحميلها متوازية فوراً بأعلى جودة.",
         parse_mode="Markdown",
@@ -293,16 +297,26 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if message is None or not message.text:
         return
 
+    user = update.effective_user
+    chat_id = message.chat_id
+    username = f"@{user.username}" if user and user.username else (user.first_name if user else f"ChatID:{chat_id}")
+    raw_text = message.text.strip().replace("\n", " ")
+    snippet = raw_text[:100] + ("..." if len(raw_text) > 100 else "")
+    logger.info(f"📩 [Telegram] Message from {username} (ChatID: {chat_id}): \"{snippet}\"")
+
     url = _extract_url(message.text)
     if not url:
+        logger.warning(f"⚠️ [Telegram] Invalid URL or plain text from {username} (ChatID: {chat_id}): \"{snippet}\"")
         err_msg = await message.reply_text("❌ الرجاء إرسال رابط صحيح يبدأ بـ http/https")
         await asyncio.sleep(4)
         await _safe_delete(context, message.chat_id, message.message_id)
         await _safe_delete(context, message.chat_id, err_msg.message_id)
         return
 
+    logger.info(f"🔗 [Telegram] Extracted URL: {url} from {username}")
     try:
         job_id = await asyncio.to_thread(send_job, url, message.chat_id)
+        logger.info(f"✅ [Telegram] Job enqueued successfully: ID={job_id} for user {username}")
         await message.reply_text(f"📥 تم إنشاء المهمة: {job_id}")
         context.application.create_task(
             wait_and_send_result(
@@ -315,9 +329,19 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             update=update,
             name=f"telegram-delivery-{job_id}",
         )
-    except Exception:
-        logger.exception("Failed to create download job")
+    except Exception as exc:
+        logger.error(f"❌ [Telegram] Failed to create download job for {url}: {exc}", exc_info=True)
         await message.reply_text("❌ فشل إنشاء المهمة. تأكد أن API Gateway يعمل.")
+
+
+async def handle_other_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    user = update.effective_user
+    username = f"@{user.username}" if user and user.username else f"ChatID:{message.chat_id}"
+    logger.info(f"📎 [Telegram] Non-text media received from {username} (ChatID: {message.chat_id})")
+    await message.reply_text("ℹ️ يرجى إرسال رابط الوسائط (فيديو/ريلز/تيك توك) لتحميله مباشرة.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -325,10 +349,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     from telegram.error import Conflict
     if isinstance(context.error, Conflict):
-        logger.warning("⚠️ Telegram 409 Conflict: Another bot instance is active. Retrying with delay...")
+        logger.warning("⚠️ [Telegram] 409 Conflict: Another bot instance is active. Retrying with delay...")
         await asyncio.sleep(8)
         return
-    logger.error("❌ Exception while handling an update:", exc_info=context.error)
+    logger.error(f"❌ [Telegram] Error while handling update: {context.error}", exc_info=context.error)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -339,14 +363,24 @@ def main() -> None:
 
     bot_log = RotatingFileHandler(
         "bot.log",
-        maxBytes=5_000_000,
+        maxBytes=10_000_000,
         backupCount=2,
         encoding="utf-8",
     )
+    dash_log = RotatingFileHandler(
+        "dashboard.log",
+        maxBytes=10_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    log_formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    bot_log.setFormatter(log_formatter)
+    dash_log.setFormatter(log_formatter)
+
     logging.basicConfig(
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         level=logging.INFO,
-        handlers=[logging.StreamHandler(), bot_log],
+        handlers=[logging.StreamHandler(), bot_log, dash_log],
         force=True,
     )
     # Prevent httpx from logging full Telegram API URLs containing bot tokens
@@ -371,9 +405,10 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    app.add_handler(MessageHandler(~filters.COMMAND & ~filters.TEXT, handle_other_media))
     app.add_error_handler(error_handler)
 
-    logger.info("🤖 Bot polling started | API Gateway mode")
+    logger.info("🤖 [Telegram] Bot polling started | Real-time Dashboard Sync active")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
