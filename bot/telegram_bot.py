@@ -14,7 +14,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonDefault,
+    ReplyKeyboardRemove,
+    Update,
+)
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
@@ -218,7 +224,11 @@ async def _send_result_media(
         )
         logger.info("TELEGRAM_VIDEO_SENT job_id=%s", job_id)
     except (BadRequest, TelegramError, asyncio.TimeoutError, ValueError) as exc:
-        logger.warning("TELEGRAM_VIDEO_DIRECT_FAILED job_id=%s error_type=%s", job_id, type(exc).__name__)
+        logger.warning(
+            "TELEGRAM_VIDEO_DIRECT_FAILED job_id=%s error_type=%s",
+            job_id,
+            type(exc).__name__,
+        )
         temp_path: Path | None = None
         try:
             document_source: Path | str = media_source
@@ -269,6 +279,7 @@ async def wait_and_send_result(
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text="🎬 جارٍ تجهيز نسخة 4K بمعدل 60 إطارًا...",
+                        reply_markup=ReplyKeyboardRemove(),
                     )
                     conversion_notice_sent = True
                 await asyncio.sleep(poll_interval_seconds)
@@ -294,6 +305,7 @@ async def wait_and_send_result(
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+                    reply_markup=ReplyKeyboardRemove(),
                 )
                 return
 
@@ -302,6 +314,7 @@ async def wait_and_send_result(
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+                reply_markup=ReplyKeyboardRemove(),
             )
             return
         except Exception as exc:
@@ -312,12 +325,16 @@ async def wait_and_send_result(
     await context.bot.send_message(
         chat_id=chat_id,
         text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message is not None:
-        await update.effective_message.reply_text("أرسل رابط الفيديو وسأرسله لك بأعلى جودة متاحة.")
+        await update.effective_message.reply_text(
+            "أرسل رابط الفيديو وسأرسله لك بأعلى جودة متاحة.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -357,7 +374,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    await message.reply_text("⏳ جارٍ تنزيل الفيديو بأعلى جودة...")
+    await message.reply_text(
+        "⏳ جارٍ تنزيل الفيديو بأعلى جودة...",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     try:
         job_id = await asyncio.to_thread(send_job, url, chat_id, "best")
         logger.info("JOB_ENQUEUED job_id=%s", job_id)
@@ -368,7 +388,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
     except Exception as exc:
         logger.error("Failed to create download job: %s", type(exc).__name__)
-        await message.reply_text("❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.")
+        await message.reply_text(
+            "❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 async def handle_convert_4k(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -421,6 +444,7 @@ async def handle_convert_4k(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await context.bot.send_message(
             chat_id=chat_id,
             text="🎬 جارٍ تجهيز نسخة 4K بمعدل 60 إطارًا...",
+            reply_markup=ReplyKeyboardRemove(),
         )
         context.application.create_task(
             wait_and_send_result(
@@ -437,6 +461,7 @@ async def handle_convert_4k(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await context.bot.send_message(
             chat_id=chat_id,
             text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+            reply_markup=ReplyKeyboardRemove(),
         )
 
 
@@ -444,6 +469,15 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if isinstance(context.error, Forbidden):
         return
     logger.error("Telegram handler error: %s", type(context.error).__name__)
+
+
+async def post_init(application: Application) -> None:
+    try:
+        await application.bot.delete_my_commands()
+        await application.bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        logger.info("TELEGRAM_LEGACY_MENUS_CLEARED")
+    except TelegramError as exc:
+        logger.warning("Telegram menu cleanup failed: %s", type(exc).__name__)
 
 
 def main() -> None:
@@ -469,7 +503,13 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)
+        .post_init(post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(handle_convert_4k, pattern=r"^convert4k:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
