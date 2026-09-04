@@ -25,7 +25,11 @@ from engine.classifier import classify
 from engine.media_engine import MediaJob, _to_media_type
 from job_queue.job_store import get_job, mark_error, mark_ready, mark_running
 from storage.result_store import save_result
-from storage.object_store import delete_private_object, upload_private_file
+from storage.object_store import (
+    create_signed_download_url,
+    delete_private_object,
+    upload_private_file,
+)
 from workers.media_worker import MediaWorker
 from job_queue.connection import get_redis_connection
 
@@ -70,19 +74,20 @@ async def execute_download(
     try:
         redis_conn = get_redis_connection()
 
-        # A converted 4K cache must never replace the default original-quality path.
         if wants_4k and MEDIA_STORAGE_DRIVER == "s3" and redis_conn is not None:
             cached_raw = redis_conn.get(_conversion_cache_key(url))
             if cached_raw:
                 cached = json.loads(cached_raw)
+                cached_key = cached["storage_key"]
+                cached_url = create_signed_download_url(cached_key)
                 result = save_result(
                     job_id,
-                    file="",
+                    file=cached_url,
                     media_type="video",
                     duration=int(cached.get("duration", 0)),
                     width=int(cached.get("width", 0)),
                     height=int(cached.get("height", 0)),
-                    storage_key=cached["storage_key"],
+                    storage_key=cached_key,
                     filename=cached.get("filename", "video.mp4"),
                 )
                 mark_ready(job_id)
@@ -90,8 +95,6 @@ async def execute_download(
                 logger.info("CONVERSION_CACHE_HIT job_id=%s", job_id)
                 return {"status": "completed", "result": result}
 
-        # 4k60 is an internal pipeline mode. The extractor should still fetch the
-        # highest available source before conversion.
         extractor_quality = "best" if wants_4k else quality
         job = MediaJob(id=job_id, url=url, quality=extractor_quality, chat_id=chat_id)
         logger.info("DOWNLOAD_STARTED job_id=%s", job_id)
@@ -129,8 +132,8 @@ async def execute_download(
         if MEDIA_STORAGE_DRIVER == "s3":
             storage_key = upload_private_file(path, job_id=job_id, kind="media")
             uploaded_keys.append(storage_key)
+            result_file = create_signed_download_url(storage_key)
             logger.info("R2_UPLOAD_COMPLETED job_id=%s", job_id)
-            result_file = ""
             if thumbnail:
                 thumbnail_storage_key = upload_private_file(
                     Path(thumbnail), job_id=job_id, kind="thumbnail"
