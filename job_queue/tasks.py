@@ -35,7 +35,6 @@ from workers.media_worker import MediaWorker
 from job_queue.connection import get_redis_connection
 
 logger = logging.getLogger("job_queue.tasks")
-
 OPTIONAL_4K_QUALITY = "4k60"
 
 
@@ -48,13 +47,7 @@ def _conversion_cache_key(url: str) -> str:
     return f"media:conversion:v2:{digest}"
 
 
-async def execute_download(
-    job_id: str,
-    url: str,
-    quality: str,
-    chat_id: int | None = None,
-) -> dict:
-    """Download highest original quality by default; convert only for 4k60 jobs."""
+async def execute_download(job_id: str, url: str, quality: str, chat_id: int | None = None) -> dict:
     cache = await create_cache()
     worker = MediaWorker(cache=cache)
     wants_4k = quality == OPTIONAL_4K_QUALITY
@@ -65,7 +58,7 @@ async def execute_download(
 
     logger.info("WORKER_STARTED job_id=%s mode=%s", job_id, mode)
     emit_flow("WORKER_STARTED", source="worker", job_id=job_id, detail=f"mode={mode}")
-    set_active_job_for_url(url, job_id)
+    set_active_job_for_url(url, job_id, mode=mode)
     mark_running(job_id, text="⏳ جارٍ تنزيل الفيديو بأعلى جودة...", progress=0.0)
 
     path: Path | None = None
@@ -76,7 +69,6 @@ async def execute_download(
 
     try:
         redis_conn = get_redis_connection()
-
         if wants_4k and MEDIA_STORAGE_DRIVER == "s3" and redis_conn is not None:
             cached_raw = redis_conn.get(_conversion_cache_key(url))
             if cached_raw:
@@ -95,7 +87,6 @@ async def execute_download(
                 )
                 mark_ready(job_id)
                 completed = True
-                logger.info("CONVERSION_CACHE_HIT job_id=%s", job_id)
                 emit_flow("CONVERSION_CACHE_HIT", source="worker", job_id=job_id)
                 emit_flow("RESULT_READY", source="worker", job_id=job_id, detail="cached_4k")
                 return {"status": "completed", "result": result}
@@ -128,12 +119,8 @@ async def execute_download(
             duration = meta.get("duration", 0)
             width = meta.get("width", 0)
             height = meta.get("height", 0)
-            emit_flow(
-                "MEDIA_INSPECTED",
-                source="worker",
-                job_id=job_id,
-                detail=f"{width}x{height};duration={int(duration or 0)}s",
-            )
+            emit_flow("MEDIA_INSPECTED", source="worker", job_id=job_id,
+                      detail=f"{width}x{height};duration={int(duration or 0)}s")
             if media_type.value == "video" and width > 0:
                 thumb_path = path.with_name(f"{path.stem}_thumb.jpg")
                 if generate_video_thumbnail(path, thumb_path):
@@ -145,7 +132,6 @@ async def execute_download(
         storage_key: str | None = None
         thumbnail_storage_key: str | None = None
         result_file = str(path.resolve())
-
         if MEDIA_STORAGE_DRIVER == "s3":
             emit_flow("R2_UPLOAD_STARTED", source="worker", job_id=job_id)
             storage_key = upload_private_file(path, job_id=job_id, kind="media")
@@ -154,9 +140,7 @@ async def execute_download(
             logger.info("R2_UPLOAD_COMPLETED job_id=%s", job_id)
             emit_flow("R2_UPLOAD_COMPLETED", source="worker", job_id=job_id)
             if thumbnail:
-                thumbnail_storage_key = upload_private_file(
-                    Path(thumbnail), job_id=job_id, kind="thumbnail"
-                )
+                thumbnail_storage_key = upload_private_file(Path(thumbnail), job_id=job_id, kind="thumbnail")
                 uploaded_keys.append(thumbnail_storage_key)
 
         result = save_result(
@@ -177,8 +161,7 @@ async def execute_download(
 
         if wants_4k and storage_key and redis_conn is not None:
             redis_conn.setex(
-                _conversion_cache_key(url),
-                CACHE_TTL_SECONDS,
+                _conversion_cache_key(url), CACHE_TTL_SECONDS,
                 json.dumps({
                     "storage_key": storage_key,
                     "duration": duration,
@@ -188,7 +171,6 @@ async def execute_download(
                 }),
             )
             emit_flow("CONVERSION_CACHE_SAVED", source="worker", job_id=job_id)
-
         return {"status": "completed", "result": result}
 
     except Exception as exc:
@@ -197,7 +179,7 @@ async def execute_download(
         emit_flow("JOB_FAILED", source="worker", job_id=job_id, level="ERROR", detail=type(exc).__name__)
         raise
     finally:
-        clear_active_job_for_url(url)
+        clear_active_job_for_url(url, mode=mode)
         if MEDIA_STORAGE_DRIVER == "s3":
             if path is not None:
                 path.unlink(missing_ok=True)
@@ -211,12 +193,12 @@ async def execute_download(
                         delete_private_object(key)
                     except Exception:
                         logger.exception("Failed to roll back uploaded object for job %s", job_id)
-        emit_flow("WORKER_FINISHED", source="worker", job_id=job_id, detail="completed" if completed else "not_completed")
+        emit_flow("WORKER_FINISHED", source="worker", job_id=job_id,
+                  detail="completed" if completed else "not_completed")
         await cache.close()
 
 
 def process_download_task(job_id: str, *legacy_args) -> dict:
-    """RQ entry point; only opaque job_id is used for new jobs."""
     if legacy_args:
         url = str(legacy_args[0])
         quality = str(legacy_args[1]) if len(legacy_args) > 1 else "best"
@@ -233,5 +215,4 @@ def process_download_task(job_id: str, *legacy_args) -> dict:
             mark_error(job_id, error="Job source URL is missing")
             emit_flow("JOB_SOURCE_MISSING", source="worker", job_id=job_id, level="ERROR")
             raise RuntimeError(f"Job source URL is missing: {job_id}")
-
     return asyncio.run(execute_download(job_id, url, quality, chat_id))
