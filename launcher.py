@@ -7,6 +7,8 @@ import subprocess
 import sys
 import signal
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 _env_file = Path(__file__).parent / ".env"
@@ -36,6 +38,33 @@ PORT = os.environ.get("PORT", "8080")
 os.environ["DOWNLOAD_API_URL"] = f"http://localhost:{PORT}"
 print(f"DOWNLOAD_API_URL configured for local API on port {PORT}")
 
+
+def _purge_pending_telegram_updates() -> None:
+    """Discard stale updates before a poller process starts.
+
+    Render rolling deploys can leave Telegram updates queued while the old instance
+    shuts down. Replaying those updates creates duplicate download jobs and user
+    messages. deleteWebhook(drop_pending_updates=true) safely clears that backlog
+    even when the bot uses long polling rather than webhooks.
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
+    if not token:
+        print("Telegram token unavailable; pending-update purge skipped")
+        return
+
+    endpoint = f"https://api.telegram.org/bot{token}/deleteWebhook"
+    payload = urllib.parse.urlencode({"drop_pending_updates": "true"}).encode("utf-8")
+    request = urllib.request.Request(endpoint, data=payload, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if 200 <= response.status < 300:
+                print("Telegram pending updates cleared")
+            else:
+                print(f"Telegram pending-update purge returned HTTP {response.status}")
+    except Exception as exc:
+        print(f"Telegram pending-update purge failed: {type(exc).__name__}")
+
+
 print(f"Starting FastAPI on port {PORT}...")
 api_proc = subprocess.Popen([
     sys.executable, "-m", "uvicorn", "main:app",
@@ -46,6 +75,7 @@ api_proc = subprocess.Popen([
 
 time.sleep(3)
 
+_purge_pending_telegram_updates()
 print("Starting Telegram bot...")
 bot_proc = subprocess.Popen([sys.executable, "bot.py"])
 
@@ -92,6 +122,7 @@ while True:
 
     if bot_proc and bot_proc.poll() is not None:
         print(f"Bot process exited with code {bot_proc.returncode}. Restarting...")
+        _purge_pending_telegram_updates()
         bot_proc = subprocess.Popen([sys.executable, "bot.py"])
 
     if worker_proc and worker_proc.poll() is not None:
