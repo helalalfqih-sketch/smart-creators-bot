@@ -24,12 +24,11 @@ from core.config import (
 logger = logging.getLogger("video_converter")
 _conversion_slots = asyncio.Semaphore(max(1, VIDEO_CONVERSION_CONCURRENCY))
 
-# 4K HEVC is extremely memory-hungry with libx265 defaults because it creates
-# multiple frame/thread pools. The Render worker is intentionally constrained to
-# one encoder/filter thread so a 2160x3840 frame cannot make the container OOM.
+# 4K HEVC is extremely memory-hungry with libx265 defaults. On the constrained
+# Render worker we disable x265 pools/WPP, keep a single frame thread, and shrink
+# lookahead/reference buffers so a 2160x3840 frame does not restart the container.
 _SAFE_ENCODER_THREADS = 1
-_SAFE_X265_PARAMS = "pools=1:frame-threads=1:wpp=0"
-_FAST_PRESETS = {"ultrafast", "superfast", "veryfast"}
+_SAFE_X265_PARAMS = "pools=none:frame-threads=1:wpp=0:rc-lookahead=5:bframes=0:ref=1"
 
 
 @dataclass(frozen=True)
@@ -101,8 +100,6 @@ def _already_at_least_target(probe: VideoProbe) -> bool:
 
 
 def _audio_is_output_compatible(probe: VideoProbe) -> bool:
-    # Unknown legacy probe values are treated as compatible for remux decisions;
-    # real ffprobe results populate these fields and force normalization when needed.
     if not probe.has_audio or not probe.audio_codec:
         return True
     return (
@@ -123,18 +120,20 @@ def _can_remux_only(probe: VideoProbe) -> bool:
 
 
 def _resource_safe_preset() -> str:
-    """Never allow a slow x265 preset to exhaust the small production worker."""
-    requested = str(VIDEO_OUTPUT_PRESET or "").strip().lower()
-    return requested if requested in _FAST_PRESETS else "veryfast"
+    """Use the lowest-memory x265 preset on the constrained production worker."""
+    # The requested preset is deliberately ignored for 4K software HEVC here.
+    # ultrafast materially reduces encoder buffering and CPU while CRF still
+    # controls the visual quality target.
+    _ = VIDEO_OUTPUT_PRESET
+    return "ultrafast"
 
 
 def build_ffmpeg_command(input_path: Path, output_path: Path, probe: VideoProbe) -> list[str]:
-    # Log only errors: retaining FFmpeg's continuous progress stderr in a Python
-    # PIPE for a long 4K conversion needlessly grows the worker's RSS.
     base = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-threads", str(_SAFE_ENCODER_THREADS),
         "-filter_threads", "1",
+        "-filter_complex_threads", "1",
         "-i", str(input_path.resolve()),
     ]
     if _can_remux_only(probe):
