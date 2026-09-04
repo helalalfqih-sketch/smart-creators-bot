@@ -2,33 +2,55 @@ from __future__ import annotations
 
 import logging
 
-from core.config import RQ_QUEUE_NAME, VIDEO_CONVERSION_TIMEOUT_SECONDS
+from core.config import (
+    RQ_4K_QUEUE_NAME,
+    RQ_QUEUE_NAME,
+    RQ_SEPARATE_4K_QUEUE_ENABLED,
+    VIDEO_CONVERSION_TIMEOUT_SECONDS,
+)
 from job_queue.connection import get_redis_connection
 
 logger = logging.getLogger("job_queue")
 
-_queue = None
-_queue_checked = False
+_queues: dict[str, object] = {}
+_queue_checks: set[str] = set()
 _OPTIONAL_4K_QUALITY = "4k60"
 
 
-def get_queue():
-    """Return the RQ queue instance, or None if Redis is unavailable."""
-    global _queue, _queue_checked
+def _target_queue_name(quality: str) -> str:
+    """Select the delivery queue without leaking source data into RQ logs.
 
-    if _queue_checked:
-        return _queue
+    The separate 4K queue is feature-gated so production remains backwards
+    compatible until a dedicated high-memory Render worker is attached to
+    ``RQ_4K_QUEUE_NAME``. Once enabled, original jobs stay on ``media`` while
+    optional 4K/60 conversions are isolated on ``media-4k``.
+    """
+    if (
+        RQ_SEPARATE_4K_QUEUE_ENABLED
+        and str(quality).strip().lower() == _OPTIONAL_4K_QUALITY
+    ):
+        return RQ_4K_QUEUE_NAME
+    return RQ_QUEUE_NAME
 
-    _queue_checked = True
+
+def get_queue(queue_name: str | None = None):
+    """Return the requested RQ queue, or None if Redis is unavailable."""
+    resolved_name = str(queue_name or RQ_QUEUE_NAME).strip() or RQ_QUEUE_NAME
+
+    if resolved_name in _queue_checks:
+        return _queues.get(resolved_name)
+
+    _queue_checks.add(resolved_name)
     redis_conn = get_redis_connection()
     if redis_conn is None:
         return None
 
     from rq import Queue
 
-    _queue = Queue(RQ_QUEUE_NAME, connection=redis_conn)
-    logger.info("RQ queue ready: %s", RQ_QUEUE_NAME)
-    return _queue
+    queue = Queue(resolved_name, connection=redis_conn)
+    _queues[resolved_name] = queue
+    logger.info("RQ queue ready: %s", resolved_name)
+    return queue
 
 
 def enqueue_download(
@@ -37,17 +59,18 @@ def enqueue_download(
     quality: str,
     chat_id: int | None = None,
 ) -> bool:
-    """Enqueue a download job without exposing URL/chat_id in RQ's job repr.
+    """Enqueue a media job using only its opaque job ID at the RQ boundary.
 
-    The complete job payload is already persisted in job_store before enqueue.
-    Only the opaque job_id crosses the RQ boundary, so the default RQ worker
-    log cannot print the source URL or Telegram ChatID.
+    The complete payload is already persisted in ``job_store`` before enqueue,
+    so default RQ logs never expose the source URL or Telegram ChatID.
 
-    Optional 4K conversions get exactly one RQ retry. This covers a transient
-    FFmpeg/worker interruption without ever duplicating normal original-video
-    deliveries.
+    Original downloads are always sent to the normal media queue. When
+    ``RQ_SEPARATE_4K_QUEUE_ENABLED=true``, optional 4K/60 jobs are sent to the
+    dedicated 4K queue and therefore cannot block or crash the original-media
+    worker. Optional 4K conversions keep exactly one RQ retry.
     """
-    queue = get_queue()
+    queue_name = _target_queue_name(quality)
+    queue = get_queue(queue_name)
     if queue is None:
         return False
 
@@ -65,5 +88,5 @@ def enqueue_download(
         failure_ttl=3600,
         retry=retry,
     )
-    logger.info("Enqueued download job %s", job_id)
+    logger.info("Enqueued download job %s queue=%s", job_id, queue_name)
     return True

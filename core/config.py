@@ -49,7 +49,7 @@ MOBILE_USER_AGENT: str = _env(
     "(KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
 )
 
-# ── Redis (optional) ──────────────────────────────────────────────────────────
+# ── Redis / RQ ────────────────────────────────────────────────────────────────
 REDIS_URL: str = (
     _env("REDIS_URL")
     or _env("REDIS_INTERNAL_URL")
@@ -58,6 +58,11 @@ REDIS_URL: str = (
 )
 CACHE_TTL_SECONDS: int = int(_env("CACHE_TTL_SECONDS", "3600"))  # 1 hour
 RQ_QUEUE_NAME: str = _env("RQ_QUEUE_NAME", "media")
+RQ_4K_QUEUE_NAME: str = _env("RQ_4K_QUEUE_NAME", "media-4k")
+RQ_WORKER_QUEUE_NAME: str = _env("RQ_WORKER_QUEUE_NAME", RQ_QUEUE_NAME)
+RQ_SEPARATE_4K_QUEUE_ENABLED: bool = _env(
+    "RQ_SEPARATE_4K_QUEUE_ENABLED", "false"
+).lower() in {"1", "true", "yes", "on"}
 JOB_TTL_SECONDS: int = int(_env("JOB_TTL_SECONDS", "86400"))  # 24 hours
 RESULT_TTL_SECONDS: int = int(_env("RESULT_TTL_SECONDS", "86400"))  # 24 hours
 
