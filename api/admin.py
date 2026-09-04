@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Response, WebSock
 from pydantic import BaseModel, ConfigDict
 
 from core.config import DOWNLOAD_DIR
+from core.flow_log import list_flow_events
 from job_queue.connection import get_redis_connection, is_redis_available
 from job_queue.job_store import JobStatus, create_job, delete_job, get_job, list_jobs, update_job
 from job_queue.queue import enqueue_download
@@ -46,12 +47,6 @@ _SECRET_MASK = "••••••••"
 
 
 class EnvSettingsPayload(BaseModel):
-    """Known dashboard-editable environment values.
-
-    Extra keys are accepted for forward compatibility, but are discarded unless
-    explicitly included in _ALLOWED_ENV_KEYS.
-    """
-
     model_config = ConfigDict(extra="allow")
 
     BOT_TOKEN: str = ""
@@ -81,17 +76,9 @@ def require_admin(
     authorization: str | None = Header(default=None),
     x_admin_token: str | None = Header(default=None),
 ) -> None:
-    """Require a configured shared token for sensitive routes.
-
-    For backward compatibility, deployments without ADMIN_API_TOKEN remain
-    accessible but emit a warning. Configure ADMIN_API_TOKEN in production.
-    """
-
     expected = _admin_token()
     if not expected:
-        logger.warning(
-            "ADMIN_API_TOKEN is not configured; sensitive admin endpoints are unprotected"
-        )
+        logger.warning("ADMIN_API_TOKEN is not configured; sensitive admin endpoints are unprotected")
         return
 
     provided = _extract_bearer(authorization) or (x_admin_token or "").strip()
@@ -323,14 +310,12 @@ def _stop_rq_job(job_id: str) -> None:
 
     try:
         from rq.command import send_stop_job_command
-
         send_stop_job_command(connection, job_id)
     except Exception:
         logger.debug("RQ stop command was not applicable for %s", job_id, exc_info=True)
 
     try:
         from rq.job import Job
-
         rq_job = Job.fetch(job_id, connection=connection)
         try:
             rq_job.cancel()
@@ -356,6 +341,12 @@ async def admin_health() -> dict[str, Any]:
 @router.get("/metrics")
 async def get_metrics() -> dict[str, Any]:
     return await asyncio.to_thread(_metrics_payload)
+
+
+@router.get("/flow-logs", dependencies=[Depends(require_admin)])
+async def get_flow_logs(limit: int = 200) -> list[dict[str, Any]]:
+    """Cross-service bot lifecycle events from Redis, with secrets excluded by design."""
+    return await asyncio.to_thread(list_flow_events, max(1, min(limit, 1000)))
 
 
 @router.get("/downloads/queue", dependencies=[Depends(require_admin)])
@@ -395,7 +386,6 @@ async def retry_download(job_id: str) -> dict[str, Any]:
     )
     if not enqueued:
         from job_queue.tasks import execute_download
-
         asyncio.create_task(execute_download(job_id, url, quality, chat_id))
 
     refreshed = await asyncio.to_thread(get_job, job_id)
@@ -494,6 +484,23 @@ def _candidate_log_files() -> list[Path]:
     return [path for path in candidates if path.exists() and path.is_file()]
 
 
+def _flow_message(event: dict[str, Any]) -> dict[str, Any]:
+    stage = str(event.get("stage") or "FLOW")
+    job_id = str(event.get("job_id") or "")
+    detail = str(event.get("detail") or "")
+    parts = [stage]
+    if job_id:
+        parts.append(f"job_id={job_id}")
+    if detail:
+        parts.append(detail)
+    return {
+        "timestamp": str(event.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+        "level": str(event.get("level") or "INFO").upper(),
+        "source": f"flow:{event.get('source') or 'system'}",
+        "message": " | ".join(parts),
+    }
+
+
 async def _logs_socket(websocket: WebSocket) -> None:
     if not await _authorize_websocket(websocket):
         return
@@ -505,12 +512,19 @@ async def _logs_socket(websocket: WebSocket) -> None:
         except OSError:
             offsets[path] = 0
 
+    seen_flow: set[str] = set()
+    initial_flow = await asyncio.to_thread(list_flow_events, 100)
+    for event in initial_flow:
+        signature = json.dumps(event, sort_keys=True, ensure_ascii=False)
+        seen_flow.add(signature)
+        await websocket.send_json(_flow_message(event))
+
     await websocket.send_json(
         {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": "INFO",
             "source": "dashboard.log",
-            "message": "Admin log WebSocket connected",
+            "message": "Admin log WebSocket connected; centralized flow stream active",
         }
     )
 
@@ -518,6 +532,21 @@ async def _logs_socket(websocket: WebSocket) -> None:
         heartbeat_at = time.monotonic()
         while True:
             found_line = False
+
+            flow_events = await asyncio.to_thread(list_flow_events, 200)
+            for event in flow_events:
+                signature = json.dumps(event, sort_keys=True, ensure_ascii=False)
+                if signature in seen_flow:
+                    continue
+                seen_flow.add(signature)
+                found_line = True
+                await websocket.send_json(_flow_message(event))
+            if len(seen_flow) > 2000:
+                seen_flow = set(
+                    json.dumps(event, sort_keys=True, ensure_ascii=False)
+                    for event in flow_events
+                )
+
             for path in _candidate_log_files():
                 offset = offsets.get(path, 0)
                 try:
@@ -544,8 +573,8 @@ async def _logs_socket(websocket: WebSocket) -> None:
                     {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "level": "DEBUG",
-                        "source": "dashboard.log",
-                        "message": "log-stream heartbeat",
+                        "source": "flow:system",
+                        "message": "FLOW_HEARTBEAT | waiting_for_activity",
                     }
                 )
                 heartbeat_at = time.monotonic()
