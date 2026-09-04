@@ -24,6 +24,13 @@ from core.config import (
 logger = logging.getLogger("video_converter")
 _conversion_slots = asyncio.Semaphore(max(1, VIDEO_CONVERSION_CONCURRENCY))
 
+# 4K HEVC is extremely memory-hungry with libx265 defaults because it creates
+# multiple frame/thread pools. The Render worker is intentionally constrained to
+# one encoder/filter thread so a 2160x3840 frame cannot make the container OOM.
+_SAFE_ENCODER_THREADS = 1
+_SAFE_X265_PARAMS = "pools=1:frame-threads=1:wpp=0"
+_FAST_PRESETS = {"ultrafast", "superfast", "veryfast"}
+
 
 @dataclass(frozen=True)
 class VideoProbe:
@@ -115,8 +122,21 @@ def _can_remux_only(probe: VideoProbe) -> bool:
     )
 
 
+def _resource_safe_preset() -> str:
+    """Never allow a slow x265 preset to exhaust the small production worker."""
+    requested = str(VIDEO_OUTPUT_PRESET or "").strip().lower()
+    return requested if requested in _FAST_PRESETS else "veryfast"
+
+
 def build_ffmpeg_command(input_path: Path, output_path: Path, probe: VideoProbe) -> list[str]:
-    base = ["ffmpeg", "-y", "-i", str(input_path.resolve())]
+    # Log only errors: retaining FFmpeg's continuous progress stderr in a Python
+    # PIPE for a long 4K conversion needlessly grows the worker's RSS.
+    base = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-threads", str(_SAFE_ENCODER_THREADS),
+        "-filter_threads", "1",
+        "-i", str(input_path.resolve()),
+    ]
     if _can_remux_only(probe):
         return base + [
             "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
@@ -128,12 +148,12 @@ def build_ffmpeg_command(input_path: Path, output_path: Path, probe: VideoProbe)
         target_w, target_h = _target_dimensions(probe)
         if VIDEO_OUTPUT_FIT == "crop":
             filters.append(
-                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"scale={target_w}:{target_h}:flags=fast_bilinear:force_original_aspect_ratio=increase,"
                 f"crop={target_w}:{target_h}"
             )
         else:
             filters.append(
-                f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                f"scale={target_w}:{target_h}:flags=fast_bilinear:force_original_aspect_ratio=decrease,"
                 f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
             )
     if probe.fps < VIDEO_OUTPUT_FPS:
@@ -147,9 +167,14 @@ def build_ffmpeg_command(input_path: Path, output_path: Path, probe: VideoProbe)
     if filters:
         command += ["-vf", ",".join(filters)]
     command += [
-        "-c:v", video_codec, "-profile:v", "main", "-pix_fmt", "yuv420p",
-        "-tag:v", "hvc1", "-preset", VIDEO_OUTPUT_PRESET, "-crf", str(VIDEO_OUTPUT_CRF),
+        "-c:v", video_codec,
+        "-threads", str(_SAFE_ENCODER_THREADS),
+        "-profile:v", "main", "-pix_fmt", "yuv420p",
+        "-tag:v", "hvc1", "-preset", _resource_safe_preset(),
+        "-crf", str(VIDEO_OUTPUT_CRF),
     ]
+    if video_codec == "libx265":
+        command += ["-x265-params", _SAFE_X265_PARAMS]
     if probe.has_audio:
         command += ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
     else:
