@@ -44,6 +44,8 @@ RESULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("TELEGRAM_RESULT_TIMEOUT_SECONDS", "
 RECENT_URL_DEDUP_SECONDS = int(os.getenv("TELEGRAM_RECENT_URL_DEDUP_SECONDS", "30"))
 OPTIONAL_4K_QUALITY = "4k60"
 _recent_url_claims: dict[str, float] = {}
+_active_result_watches: set[str] = set()
+_active_delivery_claims: set[str] = set()
 
 
 class JobResultError(RuntimeError):
@@ -189,7 +191,7 @@ def _download_remote_to_temp(url: str, suffix: str = ".mp4") -> Path:
         raise
 
 
-async def _send_result_media(
+async def _send_result_media_unlocked(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     result: dict,
@@ -263,7 +265,71 @@ async def _send_result_media(
     emit_flow("JOB_COMPLETED", source="telegram", job_id=job_id)
 
 
-async def wait_and_send_result(
+def _claim_delivery(chat_id: int, job_id: str) -> bool:
+    key = f"{chat_id}:{job_id}"
+    if key in _active_delivery_claims:
+        return False
+
+    from job_queue.connection import get_redis_connection
+
+    redis_conn = get_redis_connection()
+    if redis_conn is not None:
+        redis_key = f"media:telegram_delivery:{job_id}:{chat_id}"
+        try:
+            if not redis_conn.set(redis_key, "sending", nx=True, ex=300):
+                return False
+        except Exception as exc:
+            logger.warning("Telegram delivery idempotency unavailable: %s", type(exc).__name__)
+
+    _active_delivery_claims.add(key)
+    return True
+
+
+def _finish_delivery_claim(chat_id: int, job_id: str, *, delivered: bool) -> None:
+    key = f"{chat_id}:{job_id}"
+    _active_delivery_claims.discard(key)
+
+    from job_queue.connection import get_redis_connection
+
+    redis_conn = get_redis_connection()
+    if redis_conn is None:
+        return
+    redis_key = f"media:telegram_delivery:{job_id}:{chat_id}"
+    try:
+        if delivered:
+            redis_conn.set(redis_key, "delivered", ex=86400)
+        else:
+            redis_conn.delete(redis_key)
+    except Exception as exc:
+        logger.warning("Telegram delivery idempotency finalize unavailable: %s", type(exc).__name__)
+
+
+async def _send_result_media(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    result: dict,
+    *,
+    offer_4k: bool,
+) -> None:
+    job_id = str(result.get("job_id") or "")
+    if not _claim_delivery(chat_id, job_id):
+        emit_flow("TELEGRAM_DELIVERY_DUPLICATE_SUPPRESSED", source="telegram", job_id=job_id)
+        return
+
+    delivered = False
+    try:
+        await _send_result_media_unlocked(
+            context,
+            chat_id,
+            result,
+            offer_4k=offer_4k,
+        )
+        delivered = True
+    finally:
+        _finish_delivery_claim(chat_id, job_id, delivered=delivered)
+
+
+async def _wait_and_send_result_impl(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     job_id: str,
@@ -350,6 +416,34 @@ async def wait_and_send_result(
     )
 
 
+async def wait_and_send_result(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    job_id: str,
+    timeout_seconds: float = RESULT_WAIT_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = RESULT_POLL_INTERVAL_SECONDS,
+    *,
+    conversion_notice_already_sent: bool = False,
+) -> None:
+    watch_key = f"{chat_id}:{job_id}"
+    if watch_key in _active_result_watches:
+        emit_flow("RESULT_WATCH_DUPLICATE_SUPPRESSED", source="telegram", job_id=job_id)
+        return
+
+    _active_result_watches.add(watch_key)
+    try:
+        await _wait_and_send_result_impl(
+            context,
+            chat_id,
+            job_id,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            conversion_notice_already_sent=conversion_notice_already_sent,
+        )
+    finally:
+        _active_result_watches.discard(watch_key)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message is not None:
         emit_flow("TELEGRAM_START_COMMAND", source="telegram")
@@ -402,11 +496,25 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    await message.reply_text(
-        "⏳ جارٍ تنزيل الفيديو بأعلى جودة...",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    emit_flow("TELEGRAM_DOWNLOAD_NOTICE_SENT", source="telegram")
+    try:
+        await message.reply_text(
+            "⏳ جارٍ تنزيل الفيديو بأعلى جودة...",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        emit_flow("TELEGRAM_DOWNLOAD_NOTICE_SENT", source="telegram")
+    except BadRequest:
+        logger.warning("Telegram download notice rejected; continuing without reply markup")
+        emit_flow("TELEGRAM_DOWNLOAD_NOTICE_FALLBACK", source="telegram", level="WARN")
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⏳ جارٍ تنزيل الفيديو بأعلى جودة...",
+            )
+            emit_flow("TELEGRAM_DOWNLOAD_NOTICE_SENT", source="telegram")
+        except TelegramError as exc:
+            logger.warning("Telegram download notice unavailable: %s", type(exc).__name__)
+            emit_flow("TELEGRAM_DOWNLOAD_NOTICE_SKIPPED", source="telegram", level="WARN", detail=type(exc).__name__)
+
     try:
         job_id = await asyncio.to_thread(send_job, url, chat_id, "best")
         logger.info("JOB_ENQUEUED job_id=%s", job_id)
