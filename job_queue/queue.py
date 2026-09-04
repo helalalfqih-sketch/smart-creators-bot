@@ -9,6 +9,7 @@ logger = logging.getLogger("job_queue")
 
 _queue = None
 _queue_checked = False
+_OPTIONAL_4K_QUALITY = "4k60"
 
 
 def get_queue():
@@ -41,12 +42,19 @@ def enqueue_download(
     The complete job payload is already persisted in job_store before enqueue.
     Only the opaque job_id crosses the RQ boundary, so the default RQ worker
     log cannot print the source URL or Telegram ChatID.
+
+    Optional 4K conversions get exactly one RQ retry. This covers a transient
+    FFmpeg/worker interruption without ever duplicating normal original-video
+    deliveries.
     """
     queue = get_queue()
     if queue is None:
         return False
 
     from job_queue.tasks import process_download_task
+    from rq import Retry
+
+    retry = Retry(max=1) if str(quality).lower() == _OPTIONAL_4K_QUALITY else None
 
     queue.enqueue(
         process_download_task,
@@ -55,6 +63,7 @@ def enqueue_download(
         job_timeout=VIDEO_CONVERSION_TIMEOUT_SECONDS + 300,
         result_ttl=3600,
         failure_ttl=3600,
+        retry=retry,
     )
     logger.info("Enqueued download job %s", job_id)
     return True
