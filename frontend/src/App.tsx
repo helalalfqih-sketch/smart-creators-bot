@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { MetricsOverview } from './components/MetricsOverview';
 import { MediaDownloader } from './components/MediaDownloader';
@@ -14,11 +14,17 @@ import { SystemStatus } from './components/SystemStatus';
 import { DownloadCloud, Users, Activity, BarChart3, Terminal, Settings } from 'lucide-react';
 import { SystemMetrics, DashboardDownloadItem, LogEntry, EnvSettings } from './types';
 import { engine } from './services/engineService';
-import { TelegramService } from './services/telegramService';
-import { BotStateManager } from './services/botStateManager';
 import { WakeLockService } from './services/wakeLockService';
 import { useToast } from './context/ToastContext';
 
+/**
+ * Production dashboard.
+ *
+ * Telegram updates are intentionally NOT consumed in the browser. The sole
+ * production consumer is bot/telegram_bot.py. This page only observes server
+ * state through the dashboard APIs, which prevents a second getUpdates loop,
+ * command registration, replayed updates, and duplicate media delivery.
+ */
 export function App() {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<string>('downloader');
@@ -30,18 +36,20 @@ export function App() {
   const [usersCount, setUsersCount] = useState<number>(() => engine.getUsers().length);
 
   useEffect(() => {
-    const unsub = engine.onUsersChange((u) => {
-      setUsersCount(u.length);
-    });
+    const unsub = engine.onUsersChange((users) => setUsersCount(users.length));
     return () => unsub();
   }, []);
 
-  // Fetch / Sync state from REAL server endpoints
   const syncState = async () => {
     try {
-      // 1. Real Metrics from /api/metrics (psutil)
-      const mRes = await fetch('/api/metrics').catch(() => null);
-      if (mRes && mRes.ok) {
+      const [mRes, qRes, lRes, sRes] = await Promise.all([
+        fetch('/api/metrics').catch(() => null),
+        fetch('/api/jobs').catch(() => null),
+        fetch('/api/logs').catch(() => null),
+        fetch('/api/config').catch(() => null),
+      ]);
+
+      if (mRes?.ok) {
         const mData = await mRes.json();
         setMetrics({
           cpu: typeof mData.cpu === 'number' ? mData.cpu : (mData.system?.cpu ?? 0),
@@ -58,32 +66,21 @@ export function App() {
         });
       }
 
-      // 2. Real Queue from /api/jobs (job_store.py)
-      const qRes = await fetch('/api/jobs').catch(() => null);
-      if (qRes && qRes.ok) {
+      if (qRes?.ok) {
         const qData = await qRes.json();
-        if (Array.isArray(qData)) {
-          setQueue(qData);
-        }
+        if (Array.isArray(qData)) setQueue(qData);
       }
 
-      // 3. Real Logs from /api/logs (dashboard.log / bot.log / project.log)
-      const lRes = await fetch('/api/logs').catch(() => null);
-      if (lRes && lRes.ok) {
+      if (lRes?.ok) {
         const lData = await lRes.json();
-        if (Array.isArray(lData) && lData.length > 0) {
-          setLogs(lData);
-        }
+        if (Array.isArray(lData)) setLogs(lData);
       }
 
-      // 4. Real Settings from /api/config (.env)
-      const sRes = await fetch('/api/config').catch(() => null);
-      if (sRes && sRes.ok) {
+      if (sRes?.ok) {
         const sData = await sRes.json();
-        if (sData.ok && sData.config) {
-          setSettings(sData.config);
-        }
+        if (sData.ok && sData.config) setSettings(sData.config);
       }
+
       setOnline(true);
     } catch {
       setOnline(false);
@@ -91,7 +88,7 @@ export function App() {
   };
 
   const fetchQueue = () => {
-    syncState();
+    void syncState();
   };
 
   const handleClearLogs = () => {
@@ -100,7 +97,6 @@ export function App() {
     toast.info('تم مسح سجلات العرض');
   };
 
-  // Save settings handler directly to real .env via server
   const handleSaveSettings = async (updated: Partial<EnvSettings>) => {
     try {
       const res = await fetch('/api/config', {
@@ -118,165 +114,10 @@ export function App() {
     }
   };
 
-  const startTelegramListener = (token: string) => {
-    TelegramService.startPolling(
-      token,
-      (url, user, chatId, userInfo, originalMsgId, replyMsgId, preferredQuality) => {
-        // Check if user is blocked in dashboard
-        if (engine.isUserBlocked(chatId)) {
-          engine.addLog('WARN', `🚫 تم رفض طلب من مستخدم محظور (${user} - ${chatId})`, 'users_panel.py');
-          TelegramService.sendMessage(
-            token,
-            chatId,
-            `⛔ <b>عذراً، حسابك محظور من استخدام هذا البوت!</b>\n\nتواصل مع إدارة البوت إذا كنت تعتقد أن هذا حدث بالخطأ.`
-          ).catch(() => {});
-          return;
-        }
-
-        const platform = url ? engine.detectPlatform(url) : undefined;
-        // Record user activity in database
-        engine.recordUserActivity(chatId, userInfo, platform, true);
-
-        if (!url) return; // Command like /start without media url
-
-        const { shortDisplay } = TelegramService.cleanDisplayUrl(url);
-        engine.addLog('INFO', `📥 تم استلام رابط حقيقي من تيليجرام (${user}): ${shortDisplay}`, 'telegram_bot.py');
-        const jobId = engine.createDownloadJob(url, preferredQuality || 'best', chatId, originalMsgId, replyMsgId);
-        setQueue(engine.getQueue());
-
-        toast.info(
-          `رابط جديد من تيليجرام (${user}) 🤖`,
-          `تمت إضافة الرابط إلى طابور المعالجة (معرف: ${jobId})`,
-          {
-            duration: 6000,
-            action: {
-              label: 'عرض في الطابور',
-              onClick: () => setActiveTab('queue'),
-            },
-          }
-        );
-      },
-      (msg, level = 'INFO') => {
-        engine.addLog(level, msg, 'telegram_bot.py');
-      },
-      async (cbId, quality, jobId, chatId, messageId, fromUser) => {
-        // Handle in-chat quality button clicks without opening external browser
-        let label = quality === 'audio' ? 'MP3 الأصلي' : `${quality}p`;
-        if (quality === '1080') label = '1080p FHD';
-        else if (quality === '720') label = '720p HD';
-        else if (quality === '480') label = '480p SD';
-        else if (quality === '4k_enhanced' || quality.includes('enhanced') || quality === 'ai') label = '✨ 4K UHD AI Enhanced (60FPS)';
-
-        // 1. Instant Telegram popup notification
-        await TelegramService.answerCallbackQuery(token, cbId, `⏳ جاري التحضير بجودة ${label}...`).catch(() => {});
-
-        const res = engine.getResult(jobId);
-        if (!res) {
-          await TelegramService.answerCallbackQuery(
-            token,
-            cbId,
-            '⚠️ عذراً، انتهت صلاحية هذا الرابط. يرجى إرسال الرابط مجدداً.',
-            true
-          ).catch(() => {});
-          return;
-        }
-
-        const qualityKeyboard = TelegramService.buildQualityInlineKeyboard(
-          jobId,
-          res.available_qualities,
-          res.audio_url,
-          res.duration
-        );
-
-        if (quality === 'audio') {
-          const audioUrl = res.audio_url || res.available_qualities?.find((q) => q.type === 'audio')?.url;
-          if (audioUrl) {
-            engine.addLog('INFO', `🎵 طلب المستخدم (${fromUser}) تحميل الصوت MP3 للمهمة [${jobId}]`, 'telegram_bot.py');
-            await TelegramService.sendAudio(
-              token,
-              chatId,
-              audioUrl,
-              res.caption_text,
-              res.clean_title,
-              res.author,
-              qualityKeyboard,
-              messageId
-            );
-          }
-        } else {
-          // Find specific video quality
-          const matchedQuality = res.available_qualities?.find(
-            (q) => q.type === 'video' && (q.quality === quality || q.resolution?.includes(quality))
-          );
-          const videoTargetUrl = matchedQuality?.url || res.video_url || res.file;
-          if (videoTargetUrl) {
-            engine.addLog('INFO', `🎬 طلب المستخدم (${fromUser}) الفيديو بجودة (${label}) للمهمة [${jobId}]`, 'telegram_bot.py');
-            await TelegramService.sendVideo(
-              token,
-              chatId,
-              videoTargetUrl,
-              res.caption_text,
-              res.thumbnail,
-              qualityKeyboard,
-              label,
-              messageId
-            );
-          }
-        }
-      }
-    );
-  };
-
   useEffect(() => {
-    syncState();
+    void syncState();
+    void engine.syncServerConfig().then(() => setSettings(engine.getSettings())).catch(() => {});
 
-    // Auto restore bot state from server daemon and config
-    BotStateManager.init().then((state) => {
-      engine.syncServerConfig().then(() => {
-        const latestSettings = engine.getSettings();
-        setSettings(latestSettings);
-        const activeToken = latestSettings.BOT_TOKEN || TelegramService.getSavedToken();
-        if (state === 'running' && activeToken && activeToken !== '••••••••' && activeToken.includes(':')) {
-          startTelegramListener(activeToken);
-        }
-      });
-    });
-
-    // Listen to bot state changes (e.g. toggled from Android Modal or System Status)
-    const unsubBotState = BotStateManager.subscribe((state) => {
-      const activeToken = engine.getSettings().BOT_TOKEN || TelegramService.getSavedToken();
-      if (state === 'stopped') {
-        TelegramService.stopPolling();
-      } else if (state === 'running' && activeToken && activeToken !== '••••••••' && activeToken.includes(':')) {
-        startTelegramListener(activeToken);
-      }
-    });
-
-    // Listen to Telegram connection status changes & alert via Toast
-    let lastTgConnected: boolean | null = null;
-    const unsubTgConnection = TelegramService.onConnectionStatusChange((status) => {
-      const isRunning = BotStateManager.isRunning();
-      if (!isRunning) return; // Do not alert if bot is intentionally stopped by the user
-
-      if (lastTgConnected !== null) {
-        if (!status.connected && lastTgConnected === true) {
-          toast.error(
-            '⚠️ انقطاع الاتصال بخادم تيليجرام',
-            status.error || 'تعذر الوصول إلى Telegram API. جاري إعادة الاتصال تلقائياً...',
-            { duration: 6500 }
-          );
-        } else if (status.connected && lastTgConnected === false) {
-          toast.success(
-            '🟢 تمت استعادة الاتصال بخادم تيليجرام',
-            'تم الاتصال بنجاح واستئناف استقبال ومعالجة الروابط في الخلفية.',
-            { duration: 4500 }
-          );
-        }
-      }
-      lastTgConnected = status.connected;
-    });
-
-    // Listen to Engine processing & extraction failures & alert via Toast
     const unsubEngineErrors = engine.onError((event) => {
       toast.error(
         '❌ فشل في محرك المعالجة',
@@ -285,9 +126,8 @@ export function App() {
       );
     });
 
-    // Subscribe to real-time engine metrics & logs
-    const unsubMetrics = engine.onMetrics((m) => {
-      setMetrics(m);
+    const unsubMetrics = engine.onMetrics((nextMetrics) => {
+      setMetrics(nextMetrics);
       setQueue(engine.getQueue());
       setOnline(true);
     });
@@ -304,26 +144,23 @@ export function App() {
       setSettings(newSettings);
     });
 
-    const timer = setInterval(() => {
-      syncState();
+    const timer = window.setInterval(() => {
+      void syncState();
     }, 3000);
 
-    // Activate Screen Wake Lock to prevent Android from putting page/browser into deep sleep
     const cleanupWakeLock = WakeLockService.initAutoWakeLock();
 
     return () => {
       cleanupWakeLock();
-      unsubTgConnection();
       unsubEngineErrors();
-      unsubBotState();
       unsubMetrics();
       unsubLogs();
       unsubSettings();
-      clearInterval(timer);
+      window.clearInterval(timer);
     };
   }, []);
 
-  const activeDownloads = queue.filter((q) => q.status === 'downloading' || q.status === 'queued').length;
+  const activeDownloads = queue.filter((item) => item.status === 'downloading' || item.status === 'queued').length;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500 selection:text-white" dir="rtl">
@@ -354,41 +191,19 @@ export function App() {
           />
         )}
 
-        {activeTab === 'ai_providers' && (
-          <AiProvidersPanel />
-        )}
-
-        {activeTab === 'plans' && (
-          <PlansBillingPanel />
-        )}
-
-        {activeTab === 'users' && (
-          <UsersManagement />
-        )}
-
-        {activeTab === 'queue' && (
-          <QueueManager queue={queue} onRefresh={fetchQueue} />
-        )}
-
-        {activeTab === 'audit_logs' && (
-          <AuditLogsPanel />
-        )}
-
+        {activeTab === 'ai_providers' && <AiProvidersPanel />}
+        {activeTab === 'plans' && <PlansBillingPanel />}
+        {activeTab === 'users' && <UsersManagement />}
+        {activeTab === 'queue' && <QueueManager queue={queue} onRefresh={fetchQueue} />}
+        {activeTab === 'audit_logs' && <AuditLogsPanel />}
         {activeTab === 'metrics' && (
           <MetricsOverview metrics={metrics} onNavigateToUsers={() => setActiveTab('users')} />
         )}
-
-        {activeTab === 'logs' && (
-          <LogsConsole logs={logs} onClear={handleClearLogs} />
-        )}
-
+        {activeTab === 'logs' && <LogsConsole logs={logs} onClear={handleClearLogs} />}
         {activeTab === 'settings' && (
           <ConfigSettings settings={settings} onSave={handleSaveSettings} onNavigateToTab={setActiveTab} />
         )}
-
-        {activeTab === 'api' && (
-          <ApiDocumentation />
-        )}
+        {activeTab === 'api' && <ApiDocumentation />}
       </main>
 
       <footer className="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs text-slate-500 mb-14 md:mb-0">
@@ -398,7 +213,6 @@ export function App() {
         </div>
       </footer>
 
-      {/* VIP Mobile Bottom Quick Navigation Bar (Visible only on mobile devices) */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-900/95 backdrop-blur-lg border-t border-slate-800/90 px-1.5 py-1.5 shadow-2xl shadow-black">
         <div className="grid grid-cols-6 gap-1 max-w-md mx-auto">
           {[
@@ -416,9 +230,7 @@ export function App() {
                 key={tabItem.id}
                 onClick={() => setActiveTab(tabItem.id)}
                 className={`flex flex-col items-center justify-center py-1 rounded-xl transition-all relative ${
-                  isActive
-                    ? 'text-indigo-400 font-bold'
-                    : 'text-slate-400 hover:text-slate-200'
+                  isActive ? 'text-indigo-400 font-bold' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <div className="relative">
