@@ -30,6 +30,8 @@ _load_env()
 
 from core.config import API_HOST, API_PORT, LOG_LEVEL  # noqa: E402 (after env load)
 from api.server import app  # noqa: E402  (re-export for uvicorn)
+from fastapi import Request  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 
 from core.logging_filter import install_redacting_filter
 
@@ -48,6 +50,33 @@ logging.basicConfig(
 install_redacting_filter()
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+@app.middleware("http")
+async def disable_legacy_telegram_dashboard_paths(request: Request, call_next):
+    """Keep Telegram polling single-owner in bot.py.
+
+    The legacy dashboard used /api/telegram/toggle-daemon and
+    /api/telegram/recent-updates to start an extra poller and to synthesize
+    historical jobs back into fake Telegram updates. That caused 409 conflicts,
+    duplicate UI events, and exposed URL/chat data. Production Telegram ingress
+    now belongs exclusively to bot.py.
+    """
+    path = request.url.path
+    if path == "/api/telegram/toggle-daemon":
+        return JSONResponse(
+            {
+                "ok": True,
+                "isRunning": True,
+                "running": True,
+                "managedBy": "bot.py",
+                "message": "Telegram polling is managed by the production bot service",
+            }
+        )
+    if path == "/api/telegram/recent-updates":
+        return JSONResponse({"ok": True, "updates": []})
+    return await call_next(request)
+
 
 if __name__ == "__main__":
     import uvicorn
