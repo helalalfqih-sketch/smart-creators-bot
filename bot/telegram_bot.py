@@ -1,79 +1,64 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import logging
 import os
 import re
+import tempfile
+import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonDefault,
+    ReplyKeyboardRemove,
+    Update,
+)
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
-from core.config import BOT_TOKEN, DOWNLOAD_API_URL
+from core.config import ADMIN_API_TOKEN, BOT_TOKEN, DOWNLOAD_API_URL
+from core.flow_log import emit_flow
+from core.logging_filter import install_redacting_filter
+from core.url_normalizer import get_active_job_for_url, normalize_media_url
 
 logger = logging.getLogger("bot")
 
 API_REQUEST_TIMEOUT_SECONDS = 30
 RESULT_POLL_INTERVAL_SECONDS = 2
-RESULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("TELEGRAM_RESULT_TIMEOUT_SECONDS", "300"))
+RESULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("TELEGRAM_RESULT_TIMEOUT_SECONDS", "2100"))
+RECENT_URL_DEDUP_SECONDS = int(os.getenv("TELEGRAM_RECENT_URL_DEDUP_SECONDS", "30"))
+OPTIONAL_4K_QUALITY = "4k60"
+_recent_url_claims: dict[str, float] = {}
 
 
 class JobResultError(RuntimeError):
-    """A terminal API response while retrieving a download result."""
-
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
         self.status_code = status_code
 
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
-
 def _extract_url(text: str) -> str | None:
-    """استخراج رابط الـ URL الحقيقي بدقة وتنظيفه من النصوص والرموز الصينية الملتصقة به"""
     if not text:
         return None
-
-    url_pattern = r'(https?://[^\s，]+)'
-    match = re.search(url_pattern, text)
-
-    if match:
-        url = match.group(1).strip()
-        url = url.rstrip('.:,;?)"\'/،')
-        return url
-
-    return None
-
-
-async def _safe_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int | None) -> None:
-    if message_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except Exception:
-            pass
-
-
-def _error_detail(response: requests.Response) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        return response.text.strip() or f"HTTP {response.status_code}"
-
-    detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
-    if isinstance(detail, dict):
-        return str(detail.get("error") or detail.get("message") or detail)
-    return str(detail)
+    match = re.search(r"(https?://[^\s，]+)", text)
+    if not match:
+        return None
+    return match.group(1).strip().rstrip(".:,;?)\"'/،")
 
 
 def _is_public_http_url(value: str) -> bool:
@@ -95,18 +80,14 @@ def _is_public_http_url(value: str) -> bool:
 def _telegram_media_source(value: Any) -> Path | str | None:
     if not isinstance(value, str) or not value.strip():
         return None
-
     candidate = value.strip()
     path = Path(candidate).expanduser()
     try:
         if path.is_file():
             return path
     except OSError:
-        # URL-like or otherwise invalid filesystem values can exceed OS path limits.
         pass
-    if _is_public_http_url(candidate):
-        return candidate
-    return None
+    return candidate if _is_public_http_url(candidate) else None
 
 
 def _positive_int(value: Any) -> int | None:
@@ -117,175 +98,265 @@ def _positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
-# ── API Gateway ───────────────────────────────────────────────────────────────
+def _claim_recent_url(chat_id: int, normalized_url: str) -> bool:
+    import time
+
+    key = f"{chat_id}:{normalized_url}"
+    now = time.monotonic()
+    for stale_key, claimed_at in list(_recent_url_claims.items()):
+        if now - claimed_at >= RECENT_URL_DEDUP_SECONDS:
+            _recent_url_claims.pop(stale_key, None)
+    if key in _recent_url_claims:
+        return False
+
+    from job_queue.connection import get_redis_connection
+
+    redis_conn = get_redis_connection()
+    if redis_conn is not None:
+        digest = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()
+        redis_key = f"media:telegram_recent_url:{digest}:{chat_id}"
+        try:
+            if not redis_conn.set(redis_key, "1", nx=True, ex=RECENT_URL_DEDUP_SECONDS):
+                return False
+        except Exception as exc:
+            logger.warning("Recent URL idempotency unavailable: %s", type(exc).__name__)
+    _recent_url_claims[key] = now
+    return True
+
 
 def send_job(url: str, chat_id: int, quality: str = "best") -> str:
-    endpoint = f"{DOWNLOAD_API_URL.rstrip('/')}/media/download"
-    res = requests.post(
-        endpoint,
+    response = requests.post(
+        f"{DOWNLOAD_API_URL.rstrip('/')}/media/download",
         json={"url": url, "quality": quality, "chat_id": chat_id},
-        timeout=30,
+        timeout=API_REQUEST_TIMEOUT_SECONDS,
     )
-    res.raise_for_status()
-    return res.json()["job_id"]
+    response.raise_for_status()
+    return response.json()["job_id"]
 
 
 def get_job_status(job_id: str) -> dict:
-    endpoint = f"{DOWNLOAD_API_URL.rstrip('/')}/jobs/{job_id}"
-    response = requests.get(endpoint, timeout=API_REQUEST_TIMEOUT_SECONDS)
+    response = requests.get(
+        f"{DOWNLOAD_API_URL.rstrip('/')}/jobs/{job_id}",
+        timeout=API_REQUEST_TIMEOUT_SECONDS,
+    )
     response.raise_for_status()
     return response.json()
 
 
 def get_job_result(job_id: str) -> dict:
-    endpoint = f"{DOWNLOAD_API_URL.rstrip('/')}/jobs/{job_id}/result"
-    response = requests.get(endpoint, timeout=API_REQUEST_TIMEOUT_SECONDS)
-
+    response = requests.get(
+        f"{DOWNLOAD_API_URL.rstrip('/')}/jobs/{job_id}/result",
+        timeout=API_REQUEST_TIMEOUT_SECONDS,
+    )
     if response.status_code == 202:
         return {"status": "pending"}
-    if response.status_code == 409:
-        raise JobResultError(409, _error_detail(response))
-    if response.status_code == 410:
-        raise JobResultError(410, _error_detail(response))
-    if response.status_code == 404:
-        raise JobResultError(404, _error_detail(response))
-
+    if response.status_code in {404, 409, 410}:
+        raise JobResultError(response.status_code, "result unavailable")
     response.raise_for_status()
     return response.json()
 
 
-async def _send_result_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, result: dict) -> None:
+def confirm_job_delivery(job_id: str) -> None:
+    headers = {"X-Admin-Token": ADMIN_API_TOKEN} if ADMIN_API_TOKEN else {}
+    response = requests.post(
+        f"{DOWNLOAD_API_URL.rstrip('/')}/jobs/{job_id}/delivered",
+        headers=headers,
+        timeout=API_REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+
+
+def _four_k_markup(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🎬 تحويل إلى 4K 60FPS", callback_data=f"convert4k:{job_id}")]]
+    )
+
+
+def _download_remote_to_temp(url: str, suffix: str = ".mp4") -> Path:
+    fd, raw_path = tempfile.mkstemp(prefix="telegram-media-", suffix=suffix)
+    os.close(fd)
+    path = Path(raw_path)
+    try:
+        with requests.get(url, stream=True, timeout=(20, 180)) as response:
+            response.raise_for_status()
+            with path.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        output.write(chunk)
+        return path
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+async def _send_result_media(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    result: dict,
+    *,
+    offer_4k: bool,
+) -> None:
+    job_id = str(result.get("job_id") or "")
     media_source = _telegram_media_source(result.get("file"))
     if media_source is None:
-        raise ValueError(f"Result file is neither an existing file nor a public URL: {result.get('file')!r}")
+        emit_flow("TELEGRAM_MEDIA_SOURCE_MISSING", source="telegram", job_id=job_id, level="ERROR")
+        raise ValueError("Result media source is unavailable")
 
-    thumbnail = _telegram_media_source(result.get("thumbnail"))
     media_type = str(result.get("media_type") or "").lower()
     duration = _positive_int(result.get("duration"))
     width = _positive_int(result.get("width"))
     height = _positive_int(result.get("height"))
-    caption = "✅ اكتمل التحميل"
+    reply_markup = _four_k_markup(job_id) if offer_4k and media_type == "video" else None
 
-    if media_type == "video":
+    emit_flow("TELEGRAM_DELIVERY_STARTED", source="telegram", job_id=job_id, detail=f"type={media_type or 'unknown'}")
+
+    if media_type != "video":
+        await context.bot.send_document(chat_id=chat_id, document=media_source)
+        logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
+        emit_flow("TELEGRAM_DOCUMENT_SENT", source="telegram", job_id=job_id)
+        await asyncio.to_thread(confirm_job_delivery, job_id)
+        emit_flow("JOB_COMPLETED", source="telegram", job_id=job_id)
+        return
+
+    try:
+        await context.bot.send_video(
+            chat_id=chat_id,
+            video=media_source,
+            duration=duration,
+            width=width,
+            height=height,
+            supports_streaming=True,
+            reply_markup=reply_markup,
+        )
+        logger.info("TELEGRAM_VIDEO_SENT job_id=%s", job_id)
+        emit_flow("TELEGRAM_VIDEO_SENT", source="telegram", job_id=job_id, detail="4k_button=yes" if offer_4k else "4k_button=no")
+    except (BadRequest, TelegramError, asyncio.TimeoutError, ValueError) as exc:
+        logger.warning(
+            "TELEGRAM_VIDEO_DIRECT_FAILED job_id=%s error_type=%s",
+            job_id,
+            type(exc).__name__,
+        )
+        emit_flow("TELEGRAM_VIDEO_DIRECT_FAILED", source="telegram", job_id=job_id, level="WARN", detail=type(exc).__name__)
+        temp_path: Path | None = None
         try:
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=media_source,
-                caption=caption,
-                duration=duration,
-                width=width,
-                height=height,
-                thumbnail=thumbnail,
-                supports_streaming=True,
-            )
-            return
-        except BadRequest as exc:
-            logger.warning("sendVideo rejected result; falling back to document: %s", exc)
-            await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
-            return
+            document_source: Path | str = media_source
+            if isinstance(media_source, str) and _is_public_http_url(media_source):
+                logger.info("TELEGRAM_MEDIA_MATERIALIZE_STARTED job_id=%s", job_id)
+                emit_flow("TELEGRAM_MEDIA_MATERIALIZE_STARTED", source="telegram", job_id=job_id)
+                temp_path = await asyncio.to_thread(_download_remote_to_temp, media_source)
+                document_source = temp_path
+                logger.info("TELEGRAM_MEDIA_MATERIALIZE_COMPLETED job_id=%s", job_id)
+                emit_flow("TELEGRAM_MEDIA_MATERIALIZE_COMPLETED", source="telegram", job_id=job_id)
 
-    if media_type == "audio":
-        try:
-            await context.bot.send_audio(
+            await context.bot.send_document(
                 chat_id=chat_id,
-                audio=media_source,
-                caption=caption,
-                duration=duration,
-                thumbnail=thumbnail,
+                document=document_source,
+                reply_markup=reply_markup,
             )
-            return
-        except TelegramError as exc:
-            logger.warning("sendAudio failed; falling back to document: %s", exc)
-            await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
-            return
+            logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
+            emit_flow("TELEGRAM_DOCUMENT_SENT", source="telegram", job_id=job_id, detail="fallback=yes")
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
-    await context.bot.send_document(chat_id=chat_id, document=media_source, caption=caption)
+    await asyncio.to_thread(confirm_job_delivery, job_id)
+    emit_flow("JOB_COMPLETED", source="telegram", job_id=job_id)
 
 
 async def wait_and_send_result(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     job_id: str,
-    timeout_seconds: float = 300,
-    poll_interval_seconds: float = 2,
+    timeout_seconds: float = RESULT_WAIT_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = RESULT_POLL_INTERVAL_SECONDS,
+    *,
+    conversion_notice_already_sent: bool = False,
 ) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
+    conversion_notice_sent = conversion_notice_already_sent
+    emit_flow("RESULT_WATCH_STARTED", source="telegram", job_id=job_id)
 
     while loop.time() < deadline:
         try:
             job = await asyncio.to_thread(get_job_status, job_id)
             status = str(job.get("status") or "").lower()
+            quality = str(job.get("quality") or "best").lower()
 
             if status in {"queued", "running"}:
+                if (
+                    quality == OPTIONAL_4K_QUALITY
+                    and not conversion_notice_sent
+                    and str(job.get("text") or "").startswith("🎬")
+                ):
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="🎬 جارٍ تجهيز نسخة 4K بمعدل 60 إطارًا...",
+                        reply_markup=ReplyKeyboardRemove(),
+                    )
+                    emit_flow("TELEGRAM_4K_NOTICE_SENT", source="telegram", job_id=job_id)
+                    conversion_notice_sent = True
                 await asyncio.sleep(poll_interval_seconds)
                 continue
 
-            if status == "done":
+            if status in {"ready", "done", "completed"}:
+                emit_flow("RESULT_FETCH_STARTED", source="telegram", job_id=job_id)
                 result = await asyncio.to_thread(get_job_result, job_id)
                 if result.get("status") == "pending":
                     await asyncio.sleep(poll_interval_seconds)
                     continue
-                await _send_result_media(context, chat_id, result)
-                logger.info("Delivered result for job %s to chat %s", job_id, chat_id)
+                emit_flow("RESULT_FETCH_COMPLETED", source="telegram", job_id=job_id)
+                result["job_id"] = job_id
+                await _send_result_media(
+                    context,
+                    chat_id,
+                    result,
+                    offer_4k=(quality != OPTIONAL_4K_QUALITY),
+                )
+                logger.info("Telegram delivery confirmed for job %s", job_id)
+                emit_flow("TELEGRAM_DELIVERY_CONFIRMED", source="telegram", job_id=job_id)
                 return
 
-            if status == "error":
-                logger.error("Download job %s failed: %s", job_id, job.get("error"))
+            if status in {"error", "failed", "cancelled"}:
+                logger.error("Job %s ended unsuccessfully", job_id)
+                emit_flow("JOB_TERMINAL_ERROR", source="telegram", job_id=job_id, level="ERROR", detail=f"status={status}")
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text="❌ فشل تحميل الوسائط. حاول مرة أخرى أو أرسل رابطًا مختلفًا.",
+                    text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+                    reply_markup=ReplyKeyboardRemove(),
                 )
                 return
 
-            if status == "cancelled":
-                logger.warning("Download job %s was cancelled", job_id)
-                await context.bot.send_message(chat_id=chat_id, text="⚠️ تم إلغاء مهمة التحميل.")
-                return
-
-            logger.error("Unexpected status %r for job %s", status, job_id)
-            await context.bot.send_message(chat_id=chat_id, text="❌ تعذر تحديد حالة مهمة التحميل.")
-            return
-
-        except JobResultError as exc:
-            logger.error("Cannot retrieve result for job %s (HTTP %s): %s", job_id, exc.status_code, exc)
-            if exc.status_code == 410:
-                text = "⚠️ تم إلغاء مهمة التحميل."
-            elif exc.status_code == 409:
-                text = "❌ فشل تحميل الوسائط. حاول مرة أخرى أو أرسل رابطًا مختلفًا."
-            elif exc.status_code == 404:
-                text = "❌ اكتملت المهمة لكن لم يتم العثور على ملف النتيجة."
-            else:
-                text = "❌ تعذر استلام نتيجة التحميل."
-            await context.bot.send_message(chat_id=chat_id, text=text)
-            return
-        except requests.RequestException as exc:
-            logger.warning("Polling job %s failed temporarily: %s", job_id, exc)
             await asyncio.sleep(poll_interval_seconds)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Failed to deliver result for job %s", job_id)
+        except JobResultError as exc:
+            emit_flow("RESULT_UNAVAILABLE", source="telegram", job_id=job_id, level="ERROR", detail=f"status={exc.status_code}")
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="❌ اكتمل التحميل لكن تعذر إرسال الملف. يرجى المحاولة مرة أخرى.",
+                text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+                reply_markup=ReplyKeyboardRemove(),
             )
             return
+        except Exception as exc:
+            logger.error("Error polling job %s: %s", job_id, type(exc).__name__)
+            emit_flow("RESULT_WATCH_ERROR", source="telegram", job_id=job_id, level="WARN", detail=type(exc).__name__)
+            await asyncio.sleep(poll_interval_seconds)
 
-    logger.error("Timed out waiting for job %s after %.1f seconds", job_id, timeout_seconds)
+    logger.error("Timed out waiting for job %s", job_id)
+    emit_flow("RESULT_WATCH_TIMEOUT", source="telegram", job_id=job_id, level="ERROR")
     await context.bot.send_message(
         chat_id=chat_id,
-        text="⌛ استغرقت عملية التحميل وقتًا أطول من المتوقع. يرجى المحاولة مرة أخرى.",
+        text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
-
-# ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(
-        "👋 *مرحباً!*\n\nأرسل الروابط مباشرة وسأقوم بتحميلها متوازية فوراً بأعلى جودة.",
-        parse_mode="Markdown",
-    )
+    if update.effective_message is not None:
+        emit_flow("TELEGRAM_START_COMMAND", source="telegram")
+        await update.effective_message.reply_text(
+            "أرسل رابط الفيديو وسأرسله لك بأعلى جودة متاحة.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -293,79 +364,198 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if message is None or not message.text:
         return
 
+    chat_id = message.chat_id
+    logger.info("TELEGRAM_UPDATE_RECEIVED update_id=%s", update.update_id)
+    emit_flow("TELEGRAM_UPDATE_RECEIVED", source="telegram", detail=f"update={update.update_id}")
+
+    from job_queue.connection import get_redis_connection
+
+    redis_conn = get_redis_connection()
+    if redis_conn is not None:
+        try:
+            key = f"media:telegram_update:{update.update_id}"
+            if not redis_conn.set(key, "1", nx=True, ex=86400):
+                emit_flow("TELEGRAM_UPDATE_DUPLICATE_IGNORED", source="telegram", detail=f"update={update.update_id}")
+                return
+        except Exception:
+            pass
+
     url = _extract_url(message.text)
     if not url:
-        err_msg = await message.reply_text("❌ الرجاء إرسال رابط صحيح يبدأ بـ http/https")
-        await asyncio.sleep(4)
-        await _safe_delete(context, message.chat_id, message.message_id)
-        await _safe_delete(context, message.chat_id, err_msg.message_id)
+        emit_flow("TELEGRAM_NON_URL_IGNORED", source="telegram")
         return
 
-    try:
-        job_id = await asyncio.to_thread(send_job, url, message.chat_id)
-        await message.reply_text(f"📥 تم إنشاء المهمة: {job_id}")
+    emit_flow("URL_ACCEPTED", source="telegram")
+    norm_url = normalize_media_url(url)
+    if not _claim_recent_url(chat_id, norm_url):
+        emit_flow("URL_BURST_DUPLICATE_IGNORED", source="telegram")
+        return
+
+    existing_job_id = get_active_job_for_url(norm_url)
+    if existing_job_id:
+        logger.info("JOB_DEDUPLICATED original_job_id=%s", existing_job_id)
+        emit_flow("JOB_DEDUPLICATED", source="telegram", job_id=existing_job_id)
         context.application.create_task(
-            wait_and_send_result(
-                context,
-                message.chat_id,
-                job_id,
-                timeout_seconds=RESULT_WAIT_TIMEOUT_SECONDS,
-                poll_interval_seconds=RESULT_POLL_INTERVAL_SECONDS,
-            ),
+            wait_and_send_result(context, chat_id, existing_job_id),
+            update=update,
+            name=f"telegram-delivery-{existing_job_id}",
+        )
+        return
+
+    await message.reply_text(
+        "⏳ جارٍ تنزيل الفيديو بأعلى جودة...",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    emit_flow("TELEGRAM_DOWNLOAD_NOTICE_SENT", source="telegram")
+    try:
+        job_id = await asyncio.to_thread(send_job, url, chat_id, "best")
+        logger.info("JOB_ENQUEUED job_id=%s", job_id)
+        emit_flow("JOB_ENQUEUED", source="telegram", job_id=job_id, detail="mode=original")
+        context.application.create_task(
+            wait_and_send_result(context, chat_id, job_id),
             update=update,
             name=f"telegram-delivery-{job_id}",
         )
-    except Exception:
-        logger.exception("Failed to create download job")
-        await message.reply_text("❌ فشل إنشاء المهمة. تأكد أن API Gateway يعمل.")
+    except Exception as exc:
+        logger.error("Failed to create download job: %s", type(exc).__name__)
+        emit_flow("JOB_ENQUEUE_FAILED", source="telegram", level="ERROR", detail=type(exc).__name__)
+        await message.reply_text(
+            "❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+
+async def handle_convert_4k(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or not query.data or not query.data.startswith("convert4k:"):
+        return
+
+    await query.answer()
+    original_job_id = query.data.split(":", 1)[1]
+    emit_flow("4K_BUTTON_CLICKED", source="telegram", job_id=original_job_id)
+    if query.message is not None:
+        chat_id = query.message.chat_id
+    elif update.effective_chat is not None:
+        chat_id = update.effective_chat.id
+    else:
+        return
+
+    try:
+        original = await asyncio.to_thread(get_job_status, original_job_id)
+        url = str(original.get("url") or "")
+        if not url:
+            raise RuntimeError("source unavailable")
+
+        from job_queue.connection import get_redis_connection
+        from job_queue.job_store import create_job, mark_error
+        from job_queue.queue import enqueue_download
+
+        redis_conn = get_redis_connection()
+        if redis_conn is not None:
+            click_key = f"media:4k_click:{original_job_id}:{chat_id}"
+            if not redis_conn.set(click_key, "1", nx=True, ex=3600):
+                emit_flow("4K_BUTTON_DUPLICATE_IGNORED", source="telegram", job_id=original_job_id)
+                return
+
+        conversion_job_id = str(uuid.uuid4())
+        create_job(
+            conversion_job_id,
+            url=url,
+            quality=OPTIONAL_4K_QUALITY,
+            chat_id=chat_id,
+        )
+        if not enqueue_download(conversion_job_id, url, OPTIONAL_4K_QUALITY, chat_id):
+            mark_error(conversion_job_id, error="Queue unavailable")
+            raise RuntimeError("queue unavailable")
+
+        emit_flow("4K_JOB_ENQUEUED", source="telegram", job_id=conversion_job_id, detail=f"source_job={original_job_id}")
+        if query.message is not None:
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except TelegramError:
+                pass
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🎬 جارٍ تجهيز نسخة 4K بمعدل 60 إطارًا...",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        emit_flow("TELEGRAM_4K_NOTICE_SENT", source="telegram", job_id=conversion_job_id)
+        context.application.create_task(
+            wait_and_send_result(
+                context,
+                chat_id,
+                conversion_job_id,
+                conversion_notice_already_sent=True,
+            ),
+            update=update,
+            name=f"telegram-4k-{conversion_job_id}",
+        )
+    except Exception as exc:
+        logger.error("Failed to start optional 4K job: %s", type(exc).__name__)
+        emit_flow("4K_JOB_START_FAILED", source="telegram", job_id=original_job_id, level="ERROR", detail=type(exc).__name__)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ تعذر تنزيل أو تجهيز هذا الفيديو حاليًا.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Forbidden):
         return
-    logger.error("❌ Exception while handling an update:", exc_info=context.error)
+    logger.error("Telegram handler error: %s", type(context.error).__name__)
+    emit_flow("TELEGRAM_HANDLER_ERROR", source="telegram", level="ERROR", detail=type(context.error).__name__)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+async def post_init(application: Application) -> None:
+    try:
+        await application.bot.delete_my_commands()
+        await application.bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        logger.info("TELEGRAM_LEGACY_MENUS_CLEARED")
+        emit_flow("TELEGRAM_POLLER_READY", source="telegram")
+    except TelegramError as exc:
+        logger.warning("Telegram menu cleanup failed: %s", type(exc).__name__)
+        emit_flow("TELEGRAM_MENU_CLEANUP_FAILED", source="telegram", level="WARN", detail=type(exc).__name__)
+
 
 def main() -> None:
     if not BOT_TOKEN:
-        raise RuntimeError("❌ TELEGRAM_BOT_TOKEN مفقود")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
     bot_log = RotatingFileHandler(
-        "bot.log",
-        maxBytes=5_000_000,
-        backupCount=2,
-        encoding="utf-8",
+        "bot.log", maxBytes=10_000_000, backupCount=2, encoding="utf-8"
     )
+    dash_log = RotatingFileHandler(
+        "dashboard.log", maxBytes=10_000_000, backupCount=3, encoding="utf-8"
+    )
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    bot_log.setFormatter(formatter)
+    dash_log.setFormatter(formatter)
     logging.basicConfig(
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         level=logging.INFO,
-        handlers=[logging.StreamHandler(), bot_log],
+        handlers=[logging.StreamHandler(), bot_log, dash_log],
         force=True,
     )
-
-    from telegram.request import HTTPXRequest
-
-    request_config = HTTPXRequest(
-        connect_timeout=60.0,
-        read_timeout=60.0,
-        write_timeout=120.0,
-    )
+    install_redacting_filter()
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .request(request_config)
         .concurrent_updates(True)
+        .post_init(post_init)
         .build()
     )
-
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CallbackQueryHandler(handle_convert_4k, pattern=r"^convert4k:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_error_handler(error_handler)
 
-    logger.info("🤖 Bot polling started | API Gateway mode")
+    logger.info("Telegram production poller started")
+    emit_flow("TELEGRAM_POLLER_STARTING", source="telegram")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 

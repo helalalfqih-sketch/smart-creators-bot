@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -12,11 +13,13 @@ from job_queue.connection import get_redis_connection
 logger = logging.getLogger("job_queue.job_store")
 
 _memory_jobs: dict[str, dict[str, Any]] = {}
+JOB_STALE_SECONDS = max(600, int(os.getenv("JOB_STALE_SECONDS", "2700")))
 
 
 class JobStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
+    READY = "ready"
     DONE = "done"
     ERROR = "error"
     CANCELLED = "cancelled"
@@ -68,6 +71,86 @@ def _persist(job_id: str, record: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _record_age_seconds(record: dict[str, Any]) -> float:
+    raw = record.get("updated_at") or record.get("started_at") or record.get("created_at")
+    if not raw:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _mark_reconciled_error(record: dict[str, Any], *, reason: str, rq_status: str) -> dict[str, Any]:
+    record.update(
+        {
+            "status": JobStatus.ERROR.value,
+            "error": reason,
+            "text": "❌ فشل",
+            "completed_at": _now_iso(),
+        }
+    )
+    _persist(str(record["job_id"]), record)
+    logger.warning(
+        "RQ_TERMINAL_STATE_RECONCILED job_id=%s rq_status=%s",
+        record.get("job_id"),
+        rq_status,
+    )
+    return record
+
+
+def _reconcile_rq_terminal_state(record: dict[str, Any]) -> dict[str, Any]:
+    """Mirror dead/terminal RQ state into the persistent dashboard record.
+
+    A Render restart can leave the app record at queued/running even though RQ
+    has already lost, failed, stopped or finished the task. Active RQ jobs are
+    never timed out here; the age fallback is used only when the RQ job itself
+    is no longer present.
+    """
+    if record.get("status") not in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
+        return record
+
+    redis_conn = get_redis_connection()
+    if redis_conn is None:
+        return record
+
+    age_seconds = _record_age_seconds(record)
+    try:
+        from rq.job import Job
+
+        rq_job = Job.fetch(str(record.get("job_id")), connection=redis_conn)
+        rq_status = str(rq_job.get_status(refresh=True) or "").lower()
+    except Exception:
+        if age_seconds >= JOB_STALE_SECONDS:
+            return _mark_reconciled_error(
+                record,
+                reason="Queue task disappeared before completion",
+                rq_status="missing",
+            )
+        return record
+
+    if rq_status in {"failed", "stopped", "canceled", "cancelled"}:
+        return _mark_reconciled_error(
+            record,
+            reason="Worker interrupted before completion",
+            rq_status=rq_status,
+        )
+
+    # A finished RQ function must have published READY/DONE before returning.
+    # If it did not, the persistent record is orphaned rather than processing.
+    if rq_status in {"finished", "complete", "completed"} and age_seconds >= 60:
+        return _mark_reconciled_error(
+            record,
+            reason="Worker finished without publishing a result",
+            rq_status=rq_status,
+        )
+
+    return record
+
+
 def create_job(
     job_id: str,
     *,
@@ -86,14 +169,14 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         raw = redis_conn.get(_job_key(job_id))
         if raw is None:
             return None
-        return json.loads(raw)
+        record = json.loads(raw)
+        return _reconcile_rq_terminal_state(record)
 
     return _memory_jobs.get(job_id)
 
 
 def list_jobs(limit: int = 500) -> list[dict[str, Any]]:
     """Return newest retained jobs from Redis or the in-process fallback store."""
-
     safe_limit = max(1, min(int(limit), 5000))
     redis_conn = get_redis_connection()
     records: list[dict[str, Any]] = []
@@ -109,7 +192,7 @@ def list_jobs(limit: int = 500) -> list[dict[str, Any]]:
                 logger.warning("Ignoring malformed job record at key %r", key)
                 continue
             if isinstance(decoded, dict):
-                records.append(decoded)
+                records.append(_reconcile_rq_terminal_state(decoded))
     else:
         records = [dict(record) for record in _memory_jobs.values()]
 
@@ -165,6 +248,23 @@ def mark_done(job_id: str, *, text: str = "✅ اكتمل التحميل") -> di
             "text": text,
             "has_result": True,
             "completed_at": _now_iso(),
+            "error": None,
+        }
+    )
+    return _persist(job_id, record)
+
+
+def mark_ready(job_id: str) -> dict[str, Any] | None:
+    """Result is persisted but Telegram delivery is not confirmed yet."""
+    record = get_job(job_id)
+    if record is None:
+        return None
+    record.update(
+        {
+            "status": JobStatus.READY.value,
+            "progress": 99.0,
+            "text": "جاهز للإرسال",
+            "has_result": True,
             "error": None,
         }
     )
