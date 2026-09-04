@@ -75,17 +75,24 @@ def get_result(job_id: str) -> dict[str, Any] | None:
 
 
 def _with_fresh_signed_urls(record: dict[str, Any]) -> dict[str, Any]:
+    """Hydrate only the primary media object with a fresh signed URL.
+
+    Telegram accepts the primary video/document as an HTTP URL, but thumbnails
+    are upload-only in this delivery path. Passing a remote presigned thumbnail
+    can make python-telegram-bot raise ValueError before the API request is sent.
+    Keep the thumbnail unset for S3/R2-backed results; Telegram will generate
+    its own preview when possible.
+    """
     hydrated = dict(record)
-    if hydrated.get("storage_key") or hydrated.get("thumbnail_storage_key"):
+    if hydrated.get("storage_key"):
         try:
-            if hydrated.get("storage_key"):
-                hydrated["file"] = create_signed_download_url(hydrated["storage_key"])
-            if hydrated.get("thumbnail_storage_key"):
-                hydrated["thumbnail"] = create_signed_download_url(
-                    hydrated["thumbnail_storage_key"]
-                )
+            hydrated["file"] = create_signed_download_url(hydrated["storage_key"])
         except Exception as exc:
             logger.debug("Could not generate presigned S3 URL for job: %s", exc)
+
+    if hydrated.get("thumbnail_storage_key"):
+        hydrated["thumbnail"] = None
+
     return hydrated
 
 
