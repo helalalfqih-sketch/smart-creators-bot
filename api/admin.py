@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import logging
 import os
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,8 @@ from storage.result_store import delete_result
 logger = logging.getLogger("api.admin")
 
 router = APIRouter(prefix="/api/v1", tags=["admin"])
+# This router intentionally has no prefix. api.server includes it before legacy
+# compatibility endpoints, so hardened dashboard routes registered here win.
 ws_router = APIRouter(tags=["admin-websocket"])
 
 _STARTED_MONOTONIC = time.monotonic()
@@ -69,21 +73,52 @@ def _extract_bearer(value: str | None) -> str:
     scheme, _, token = value.partition(" ")
     if scheme.lower() == "bearer" and token:
         return token.strip()
-    return value.strip()
+    return ""
+
+
+def _basic_credentials(value: str | None) -> tuple[str, str] | None:
+    if not value:
+        return None
+    scheme, _, encoded = value.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return None
+    try:
+        decoded = base64.b64decode(encoded.strip()).decode("utf-8")
+        username, password = decoded.split(":", 1)
+        return username, password
+    except Exception:
+        return None
 
 
 def require_admin(
     authorization: str | None = Header(default=None),
     x_admin_token: str | None = Header(default=None),
 ) -> None:
-    expected = _admin_token()
-    if not expected:
-        logger.warning("ADMIN_API_TOKEN is not configured; sensitive admin endpoints are unprotected")
+    expected_token = _admin_token()
+    expected_user = os.getenv("DASHBOARD_USERNAME", "admin").strip()
+    expected_pass = os.getenv("DASHBOARD_PASSWORD", "").strip() or expected_token
+
+    if not expected_token and not expected_pass:
+        logger.warning("Dashboard authentication is not configured")
         return
 
-    provided = _extract_bearer(authorization) or (x_admin_token or "").strip()
-    if not hmac.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail="Invalid or missing admin token")
+    if x_admin_token and expected_token and hmac.compare_digest(x_admin_token.strip(), expected_token):
+        return
+
+    bearer = _extract_bearer(authorization)
+    if bearer and (
+        (expected_token and hmac.compare_digest(bearer, expected_token))
+        or (expected_pass and hmac.compare_digest(bearer, expected_pass))
+    ):
+        return
+
+    basic = _basic_credentials(authorization)
+    if basic is not None:
+        username, password = basic
+        if hmac.compare_digest(username, expected_user) and expected_pass and hmac.compare_digest(password, expected_pass):
+            return
+
+    raise HTTPException(status_code=401, detail="Invalid or missing admin credentials")
 
 
 async def _authorize_websocket(websocket: WebSocket) -> bool:
@@ -130,7 +165,12 @@ def _duration_text(job: dict[str, Any]) -> str:
 
 
 def _platform_for_url(value: str) -> str:
-    host = (urlparse(value).hostname or "").lower()
+    """Classify the source domain without guessing unknown hosts as Twitter."""
+    host = (urlparse(value).hostname or "").lower().removeprefix("www.")
+    if not host:
+        return "Unknown"
+    if host == "xhslink.com" or host.endswith(".xhslink.com") or "xiaohongshu" in host:
+        return "Xiaohongshu"
     if "tiktok" in host:
         return "TikTok"
     if "douyin" in host:
@@ -139,15 +179,26 @@ def _platform_for_url(value: str) -> str:
         return "Instagram"
     if "youtu" in host:
         return "YouTube"
-    if "twitter" in host or host.endswith("x.com"):
+    if host == "x.com" or host.endswith(".x.com") or "twitter" in host:
         return "Twitter"
-    return "Twitter"
+    if "facebook" in host or host == "fb.watch" or host.endswith(".fb.watch"):
+        return "Facebook"
+    if "pinterest" in host or host == "pin.it" or host.endswith(".pin.it"):
+        return "Pinterest"
+    if "threads" in host:
+        return "Threads"
+    if "bilibili" in host or host == "b23.tv" or host.endswith(".b23.tv"):
+        return "Bilibili"
+    if "likee" in host:
+        return "Likee"
+    return "Other"
 
 
 def _dashboard_status(raw: str) -> str:
     return {
         JobStatus.QUEUED.value: "queued",
         JobStatus.RUNNING.value: "downloading",
+        JobStatus.READY.value: "completed",
         JobStatus.DONE.value: "completed",
         JobStatus.ERROR.value: "failed",
         JobStatus.CANCELLED.value: "failed",
@@ -189,7 +240,10 @@ def _metrics_payload() -> dict[str, Any]:
     jobs = list_jobs(limit=1000)
     running = [j for j in jobs if j.get("status") == JobStatus.RUNNING.value]
     today = datetime.now(timezone.utc).date()
-    jobs_today = [j for j in jobs if (_parse_iso(j.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)).date() == today]
+    jobs_today = [
+        j for j in jobs
+        if (_parse_iso(j.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)).date() == today
+    ]
     completed = [j for j in jobs_today if j.get("status") == JobStatus.DONE.value]
     failed = [j for j in jobs_today if j.get("status") == JobStatus.ERROR.value]
     finished_count = len(completed) + len(failed)
@@ -345,7 +399,6 @@ async def get_metrics() -> dict[str, Any]:
 
 @router.get("/flow-logs", dependencies=[Depends(require_admin)])
 async def get_flow_logs(limit: int = 200) -> list[dict[str, Any]]:
-    """Cross-service bot lifecycle events from Redis, with secrets excluded by design."""
     return await asyncio.to_thread(list_flow_events, max(1, min(limit, 1000)))
 
 
@@ -369,21 +422,9 @@ async def retry_download(job_id: str) -> dict[str, Any]:
 
     await asyncio.to_thread(_stop_rq_job, job_id)
     await asyncio.to_thread(delete_result, job_id)
-    await asyncio.to_thread(
-        create_job,
-        job_id,
-        url=url,
-        quality=quality,
-        chat_id=chat_id,
-    )
+    await asyncio.to_thread(create_job, job_id, url=url, quality=quality, chat_id=chat_id)
 
-    enqueued = await asyncio.to_thread(
-        enqueue_download,
-        job_id,
-        url,
-        quality,
-        chat_id,
-    )
+    enqueued = await asyncio.to_thread(enqueue_download, job_id, url, quality, chat_id)
     if not enqueued:
         from job_queue.tasks import execute_download
         asyncio.create_task(execute_download(job_id, url, quality, chat_id))
@@ -450,6 +491,199 @@ async def put_env_settings(payload: EnvSettingsPayload) -> dict[str, Any]:
     return await asyncio.to_thread(_settings_payload)
 
 
+# ---------------------------------------------------------------------------
+# Hardened compatibility routes. api.server includes ws_router before its old
+# dashboard compatibility routes, so these handlers are selected first.
+# ---------------------------------------------------------------------------
+
+
+def _candidate_log_files() -> list[Path]:
+    candidates = [
+        Path("bot.log"),
+        Path("dashboard.log"),
+        Path("logs/bot.log"),
+        Path("logs/dashboard.log"),
+    ]
+    return [path for path in candidates if path.exists() and path.is_file()]
+
+
+def _flow_message(event: dict[str, Any]) -> dict[str, Any]:
+    stage = str(event.get("stage") or "FLOW")
+    job_id = str(event.get("job_id") or "")
+    detail = str(event.get("detail") or "")
+    parts = [f"FLOW {stage}"]
+    if job_id:
+        parts.append(f"job_id={job_id}")
+    if detail:
+        parts.append(detail)
+    return {
+        "timestamp": str(event.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+        "level": str(event.get("level") or "INFO").upper(),
+        "source": f"flow:{event.get('source') or 'system'}",
+        "message": " | ".join(parts),
+    }
+
+
+def _dashboard_log_is_noise(text: str) -> bool:
+    if "[flow.dashboard] FLOW " in text:
+        return True
+    routine = (
+        '"GET /api/metrics"',
+        '"GET /api/config"',
+        '"GET /api/jobs"',
+        '"GET /api/telegram/bot-status"',
+        '"GET /api/telegram/daemon-status"',
+        '"GET /api/logs"',
+        '"GET /jobs/',
+    )
+    return any(fragment in text for fragment in routine)
+
+
+def _local_alert_entries(limit: int) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in _candidate_log_files():
+        try:
+            raw_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for raw in raw_lines[-max(limit * 4, 200):]:
+            text = raw.strip()
+            if not text or text in seen or _dashboard_log_is_noise(text):
+                continue
+            # Flow events contain the normal lifecycle. Local logs are retained
+            # here only when they carry a warning/error worth diagnosing.
+            upper = text.upper()
+            if "ERROR" not in upper and "WARNING" not in upper and "WARN" not in upper and "TRACEBACK" not in upper:
+                continue
+            seen.add(text)
+            level = "ERROR" if "ERROR" in upper or "TRACEBACK" in upper else "WARN"
+            entries.append({
+                "id": f"alert_{abs(hash(text))}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": level,
+                "source": path.name,
+                "message": text,
+            })
+    return entries[-limit:]
+
+
+@ws_router.get("/api/logs", include_in_schema=False, dependencies=[Depends(require_admin)])
+async def api_clean_flow_logs(limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 200), 1000))
+    flow_events = await asyncio.to_thread(list_flow_events, safe_limit)
+    entries: list[dict[str, Any]] = []
+    for idx, event in enumerate(flow_events):
+        entry = _flow_message(event)
+        entry["id"] = f"flow_{idx}_{abs(hash(json.dumps(event, sort_keys=True, ensure_ascii=False)))}"
+        entries.append(entry)
+    alerts = await asyncio.to_thread(_local_alert_entries, max(20, safe_limit // 4))
+    return (entries + alerts)[-safe_limit:]
+
+
+@ws_router.get("/api/telegram/recent-updates", include_in_schema=False)
+async def api_no_legacy_replay() -> dict[str, Any]:
+    """The production poller owns Telegram updates; the dashboard must not replay them."""
+    return {"ok": True, "updates": [], "source": "production-poller"}
+
+
+async def _telegram_send_video_file(client: Any, token: str, chat_id: str, path: Path) -> dict[str, Any]:
+    with path.open("rb") as handle:
+        response = await client.post(
+            f"https://api.telegram.org/bot{token}/sendVideo",
+            data={"chat_id": chat_id, "supports_streaming": "true"},
+            files={"video": (path.name or "video.mp4", handle, "video/mp4")},
+        )
+    try:
+        return response.json()
+    except Exception:
+        return {"ok": False, "description": "Invalid Telegram response"}
+
+
+@ws_router.post("/api/telegram/send-media", include_in_schema=False, dependencies=[Depends(require_admin)])
+async def api_telegram_send_video_only(body: dict) -> dict[str, Any]:
+    """Dashboard compatibility sender: actual video only, never a report or link fallback."""
+    raw_chat_id = str(body.get("chat_id") or "").strip()
+    if not raw_chat_id or raw_chat_id.lower() in {"unknown", "anonymous", "none"}:
+        return {"ok": False, "description": "حدد وجهة Telegram صالحة"}
+
+    media_type = str(body.get("type") or "video").lower()
+    if media_type != "video":
+        return {"ok": False, "description": "مسار لوحة التحكم يسمح بإرسال الفيديو فقط"}
+
+    media_file = str(body.get("file") or "").strip()
+    if not media_file:
+        return {"ok": False, "description": "ملف الفيديو غير متوفر"}
+
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
+    if not token:
+        raise HTTPException(status_code=500, detail="Bot token is not configured on the server")
+
+    import httpx
+
+    timeout = httpx.Timeout(180.0, connect=20.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        local_path: Path | None = None
+        try:
+            candidate = Path(media_file)
+            if candidate.is_file():
+                local_path = candidate
+            else:
+                download_candidate = DOWNLOAD_DIR / candidate.name
+                if download_candidate.is_file():
+                    local_path = download_candidate
+        except (OSError, ValueError):
+            local_path = None
+
+        if local_path is not None:
+            result = await _telegram_send_video_file(client, token, raw_chat_id, local_path)
+            if result.get("ok"):
+                logger.info("DASHBOARD_TELEGRAM_VIDEO_SENT")
+                message = result.get("result") or {}
+                return {"ok": True, "delivery": "video", "message_id": message.get("message_id")}
+            return {"ok": False, "description": "Telegram rejected video delivery"}
+
+        if not media_file.startswith(("http://", "https://")):
+            return {"ok": False, "description": "ملف الفيديو غير قابل للإرسال"}
+
+        direct = await client.post(
+            f"https://api.telegram.org/bot{token}/sendVideo",
+            json={"chat_id": raw_chat_id, "video": media_file, "supports_streaming": True},
+        )
+        try:
+            direct_result = direct.json()
+        except Exception:
+            direct_result = {"ok": False}
+        if direct_result.get("ok"):
+            logger.info("DASHBOARD_TELEGRAM_VIDEO_SENT")
+            message = direct_result.get("result") or {}
+            return {"ok": True, "delivery": "video", "message_id": message.get("message_id")}
+
+        # If Telegram cannot fetch the signed URL itself, materialize it and
+        # upload the actual bytes. Never fall back to sendMessage or a link card.
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="dashboard-video-", suffix=".mp4", delete=False) as temp:
+                temp_path = Path(temp.name)
+                async with client.stream("GET", media_file) as upstream:
+                    upstream.raise_for_status()
+                    async for chunk in upstream.aiter_bytes(1024 * 1024):
+                        if chunk:
+                            temp.write(chunk)
+            uploaded = await _telegram_send_video_file(client, token, raw_chat_id, temp_path)
+            if uploaded.get("ok"):
+                logger.info("DASHBOARD_TELEGRAM_VIDEO_SENT materialized=true")
+                message = uploaded.get("result") or {}
+                return {"ok": True, "delivery": "video", "message_id": message.get("message_id")}
+            return {"ok": False, "description": "Telegram rejected uploaded video"}
+        except Exception as exc:
+            logger.warning("DASHBOARD_TELEGRAM_VIDEO_FAILED error_type=%s", type(exc).__name__)
+            return {"ok": False, "description": "تعذر إرسال الفيديو الفعلي"}
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+
+
 async def _metrics_socket(websocket: WebSocket) -> None:
     if not await _authorize_websocket(websocket):
         return
@@ -474,33 +708,6 @@ async def metrics_websocket(websocket: WebSocket) -> None:
     await _metrics_socket(websocket)
 
 
-def _candidate_log_files() -> list[Path]:
-    candidates = [
-        Path("bot.log"),
-        Path("dashboard.log"),
-        Path("logs/bot.log"),
-        Path("logs/dashboard.log"),
-    ]
-    return [path for path in candidates if path.exists() and path.is_file()]
-
-
-def _flow_message(event: dict[str, Any]) -> dict[str, Any]:
-    stage = str(event.get("stage") or "FLOW")
-    job_id = str(event.get("job_id") or "")
-    detail = str(event.get("detail") or "")
-    parts = [stage]
-    if job_id:
-        parts.append(f"job_id={job_id}")
-    if detail:
-        parts.append(detail)
-    return {
-        "timestamp": str(event.get("timestamp") or datetime.now(timezone.utc).isoformat()),
-        "level": str(event.get("level") or "INFO").upper(),
-        "source": f"flow:{event.get('source') or 'system'}",
-        "message": " | ".join(parts),
-    }
-
-
 async def _logs_socket(websocket: WebSocket) -> None:
     if not await _authorize_websocket(websocket):
         return
@@ -519,14 +726,12 @@ async def _logs_socket(websocket: WebSocket) -> None:
         seen_flow.add(signature)
         await websocket.send_json(_flow_message(event))
 
-    await websocket.send_json(
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": "INFO",
-            "source": "dashboard.log",
-            "message": "Admin log WebSocket connected; centralized flow stream active",
-        }
-    )
+    await websocket.send_json({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": "INFO",
+        "source": "flow:system",
+        "message": "FLOW DASHBOARD_CONNECTED",
+    })
 
     try:
         heartbeat_at = time.monotonic()
@@ -542,10 +747,10 @@ async def _logs_socket(websocket: WebSocket) -> None:
                 found_line = True
                 await websocket.send_json(_flow_message(event))
             if len(seen_flow) > 2000:
-                seen_flow = set(
+                seen_flow = {
                     json.dumps(event, sort_keys=True, ensure_ascii=False)
                     for event in flow_events
-                )
+                }
 
             for path in _candidate_log_files():
                 offset = offsets.get(path, 0)
@@ -553,30 +758,31 @@ async def _logs_socket(websocket: WebSocket) -> None:
                     with path.open("r", encoding="utf-8", errors="replace") as handle:
                         handle.seek(offset)
                         for line in handle:
-                            found_line = True
                             text = line.rstrip()
-                            level = "ERROR" if "ERROR" in text else "WARN" if "WARN" in text or "WARNING" in text else "DEBUG" if "DEBUG" in text else "INFO"
-                            await websocket.send_json(
-                                {
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    "level": level,
-                                    "source": path.name,
-                                    "message": text,
-                                }
-                            )
+                            upper = text.upper()
+                            if _dashboard_log_is_noise(text):
+                                continue
+                            if "ERROR" not in upper and "WARNING" not in upper and "WARN" not in upper and "TRACEBACK" not in upper:
+                                continue
+                            found_line = True
+                            level = "ERROR" if "ERROR" in upper or "TRACEBACK" in upper else "WARN"
+                            await websocket.send_json({
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "level": level,
+                                "source": path.name,
+                                "message": text,
+                            })
                         offsets[path] = handle.tell()
                 except OSError:
                     continue
 
             if not found_line and time.monotonic() - heartbeat_at >= 15:
-                await websocket.send_json(
-                    {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "level": "DEBUG",
-                        "source": "flow:system",
-                        "message": "FLOW_HEARTBEAT | waiting_for_activity",
-                    }
-                )
+                await websocket.send_json({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "level": "DEBUG",
+                    "source": "flow:system",
+                    "message": "FLOW_HEARTBEAT | waiting_for_activity",
+                })
                 heartbeat_at = time.monotonic()
             await asyncio.sleep(1)
     except WebSocketDisconnect:
