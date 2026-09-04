@@ -23,7 +23,7 @@ from core.url_normalizer import clear_active_job_for_url, normalize_media_url, s
 from core.video_converter import prepare_video
 from engine.classifier import classify
 from engine.media_engine import MediaJob, _to_media_type
-from job_queue.job_store import mark_error, mark_ready, mark_running
+from job_queue.job_store import get_job, mark_error, mark_ready, mark_running
 from storage.result_store import save_result
 from storage.object_store import delete_private_object, upload_private_file
 from workers.media_worker import MediaWorker
@@ -122,7 +122,7 @@ async def execute_download(
         if MEDIA_STORAGE_DRIVER == "s3":
             storage_key = upload_private_file(path, job_id=job_id, kind="media")
             uploaded_keys.append(storage_key)
-            logger.info("R2_UPLOAD_COMPLETED job_id=%s key=%s", job_id, storage_key)
+            logger.info("R2_UPLOAD_COMPLETED job_id=%s", job_id)
             result_file = ""
             if thumbnail:
                 thumbnail_storage_key = upload_private_file(
@@ -187,11 +187,26 @@ async def execute_download(
         await cache.close()
 
 
-def process_download_task(
-    job_id: str,
-    url: str,
-    quality: str,
-    chat_id: int | None = None,
-) -> dict:
-    """RQ entry point – sync wrapper around async download pipeline."""
+def process_download_task(job_id: str, *legacy_args) -> dict:
+    """RQ entry point.
+
+    New jobs pass only job_id so RQ logs never contain source URLs or ChatIDs.
+    legacy_args are accepted only so jobs queued by an older deployment can still
+    finish during a rolling deploy.
+    """
+    if legacy_args:
+        url = str(legacy_args[0])
+        quality = str(legacy_args[1]) if len(legacy_args) > 1 else "best"
+        chat_id = legacy_args[2] if len(legacy_args) > 2 else None
+    else:
+        record = get_job(job_id)
+        if record is None:
+            raise RuntimeError(f"Job record not found: {job_id}")
+        url = str(record.get("url") or "")
+        quality = str(record.get("quality") or "best")
+        chat_id = record.get("chat_id")
+        if not url:
+            mark_error(job_id, error="Job source URL is missing")
+            raise RuntimeError(f"Job source URL is missing: {job_id}")
+
     return asyncio.run(execute_download(job_id, url, quality, chat_id))
