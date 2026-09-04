@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import logging
 import os
 import re
+import tempfile
 import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -104,7 +106,8 @@ def _claim_recent_url(chat_id: int, normalized_url: str) -> bool:
 
     redis_conn = get_redis_connection()
     if redis_conn is not None:
-        redis_key = f"media:telegram_recent_url:{hash(normalized_url)}:{chat_id}"
+        digest = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()
+        redis_key = f"media:telegram_recent_url:{digest}:{chat_id}"
         try:
             if not redis_conn.set(redis_key, "1", nx=True, ex=RECENT_URL_DEDUP_SECONDS):
                 return False
@@ -115,14 +118,13 @@ def _claim_recent_url(chat_id: int, normalized_url: str) -> bool:
 
 
 def send_job(url: str, chat_id: int, quality: str = "best") -> str:
-    endpoint = f"{DOWNLOAD_API_URL.rstrip('/')}/media/download"
-    res = requests.post(
-        endpoint,
+    response = requests.post(
+        f"{DOWNLOAD_API_URL.rstrip('/')}/media/download",
         json={"url": url, "quality": quality, "chat_id": chat_id},
         timeout=API_REQUEST_TIMEOUT_SECONDS,
     )
-    res.raise_for_status()
-    return res.json()["job_id"]
+    response.raise_for_status()
+    return response.json()["job_id"]
 
 
 def get_job_status(job_id: str) -> dict:
@@ -163,6 +165,23 @@ def _four_k_markup(job_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _download_remote_to_temp(url: str, suffix: str = ".mp4") -> Path:
+    fd, raw_path = tempfile.mkstemp(prefix="telegram-media-", suffix=suffix)
+    os.close(fd)
+    path = Path(raw_path)
+    try:
+        with requests.get(url, stream=True, timeout=(20, 180)) as response:
+            response.raise_for_status()
+            with path.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        output.write(chunk)
+        return path
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
 async def _send_result_media(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -174,7 +193,6 @@ async def _send_result_media(
     if media_source is None:
         raise ValueError("Result media source is unavailable")
 
-    thumbnail = _telegram_media_source(result.get("thumbnail"))
     media_type = str(result.get("media_type") or "").lower()
     duration = _positive_int(result.get("duration"))
     width = _positive_int(result.get("width"))
@@ -182,30 +200,43 @@ async def _send_result_media(
     job_id = str(result.get("job_id") or "")
     reply_markup = _four_k_markup(job_id) if offer_4k and media_type == "video" else None
 
-    if media_type == "video":
+    if media_type != "video":
+        await context.bot.send_document(chat_id=chat_id, document=media_source)
+        logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
+        await asyncio.to_thread(confirm_job_delivery, job_id)
+        return
+
+    try:
+        await context.bot.send_video(
+            chat_id=chat_id,
+            video=media_source,
+            duration=duration,
+            width=width,
+            height=height,
+            supports_streaming=True,
+            reply_markup=reply_markup,
+        )
+        logger.info("TELEGRAM_VIDEO_SENT job_id=%s", job_id)
+    except (BadRequest, TelegramError, asyncio.TimeoutError, ValueError) as exc:
+        logger.warning("TELEGRAM_VIDEO_DIRECT_FAILED job_id=%s error_type=%s", job_id, type(exc).__name__)
+        temp_path: Path | None = None
         try:
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=media_source,
-                duration=duration,
-                width=width,
-                height=height,
-                thumbnail=thumbnail,
-                supports_streaming=True,
-                reply_markup=reply_markup,
-            )
-            logger.info("TELEGRAM_VIDEO_SENT job_id=%s", job_id)
-        except (BadRequest, TelegramError, asyncio.TimeoutError) as exc:
-            logger.warning("sendVideo rejected result; using document: %s", type(exc).__name__)
+            document_source: Path | str = media_source
+            if isinstance(media_source, str) and _is_public_http_url(media_source):
+                logger.info("TELEGRAM_MEDIA_MATERIALIZE_STARTED job_id=%s", job_id)
+                temp_path = await asyncio.to_thread(_download_remote_to_temp, media_source)
+                document_source = temp_path
+                logger.info("TELEGRAM_MEDIA_MATERIALIZE_COMPLETED job_id=%s", job_id)
+
             await context.bot.send_document(
                 chat_id=chat_id,
-                document=media_source,
+                document=document_source,
                 reply_markup=reply_markup,
             )
             logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
-    else:
-        await context.bot.send_document(chat_id=chat_id, document=media_source)
-        logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
 
     await asyncio.to_thread(confirm_job_delivery, job_id)
 
@@ -285,7 +316,8 @@ async def wait_and_send_result(
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("أرسل رابط الفيديو وسأرسله لك بأعلى جودة متاحة.")
+    if update.effective_message is not None:
+        await update.effective_message.reply_text("أرسل رابط الفيديو وسأرسله لك بأعلى جودة متاحة.")
 
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -346,7 +378,12 @@ async def handle_convert_4k(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await query.answer()
     original_job_id = query.data.split(":", 1)[1]
-    chat_id = query.message.chat_id if query.message else update.effective_chat.id
+    if query.message is not None:
+        chat_id = query.message.chat_id
+    elif update.effective_chat is not None:
+        chat_id = update.effective_chat.id
+    else:
+        return
 
     try:
         original = await asyncio.to_thread(get_job_status, original_job_id)
@@ -375,7 +412,7 @@ async def handle_convert_4k(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             mark_error(conversion_job_id, error="Queue unavailable")
             raise RuntimeError("queue unavailable")
 
-        if query.message:
+        if query.message is not None:
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
             except TelegramError:
@@ -413,8 +450,12 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
-    bot_log = RotatingFileHandler("bot.log", maxBytes=10_000_000, backupCount=2, encoding="utf-8")
-    dash_log = RotatingFileHandler("dashboard.log", maxBytes=10_000_000, backupCount=3, encoding="utf-8")
+    bot_log = RotatingFileHandler(
+        "bot.log", maxBytes=10_000_000, backupCount=2, encoding="utf-8"
+    )
+    dash_log = RotatingFileHandler(
+        "dashboard.log", maxBytes=10_000_000, backupCount=3, encoding="utf-8"
+    )
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     bot_log.setFormatter(formatter)
     dash_log.setFormatter(formatter)
