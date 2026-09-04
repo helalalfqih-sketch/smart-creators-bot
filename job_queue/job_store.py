@@ -69,6 +69,47 @@ def _persist(job_id: str, record: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _reconcile_rq_terminal_state(record: dict[str, Any]) -> dict[str, Any]:
+    """Mirror terminal RQ failure into our persistent job state.
+
+    If Render restarts a worker mid-FFmpeg, RQ can move the task to the failed
+    registry while our own record still says running. Reconcile that state so
+    Telegram does not wait until its polling timeout or deduplicate against a
+    dead task.
+    """
+    if record.get("status") not in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
+        return record
+
+    redis_conn = get_redis_connection()
+    if redis_conn is None:
+        return record
+
+    try:
+        from rq.job import Job
+        rq_job = Job.fetch(str(record.get("job_id")), connection=redis_conn)
+        rq_status = str(rq_job.get_status(refresh=True) or "").lower()
+    except Exception:
+        return record
+
+    if rq_status in {"failed", "stopped", "canceled", "cancelled"}:
+        record.update(
+            {
+                "status": JobStatus.ERROR.value,
+                "error": "Worker interrupted before completion",
+                "text": "❌ فشل",
+                "completed_at": _now_iso(),
+            }
+        )
+        _persist(str(record["job_id"]), record)
+        logger.warning(
+            "RQ_TERMINAL_STATE_RECONCILED job_id=%s rq_status=%s",
+            record.get("job_id"),
+            rq_status,
+        )
+
+    return record
+
+
 def create_job(
     job_id: str,
     *,
@@ -87,7 +128,8 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         raw = redis_conn.get(_job_key(job_id))
         if raw is None:
             return None
-        return json.loads(raw)
+        record = json.loads(raw)
+        return _reconcile_rq_terminal_state(record)
 
     return _memory_jobs.get(job_id)
 
@@ -110,7 +152,7 @@ def list_jobs(limit: int = 500) -> list[dict[str, Any]]:
                 logger.warning("Ignoring malformed job record at key %r", key)
                 continue
             if isinstance(decoded, dict):
-                records.append(decoded)
+                records.append(_reconcile_rq_terminal_state(decoded))
     else:
         records = [dict(record) for record in _memory_jobs.values()]
 
