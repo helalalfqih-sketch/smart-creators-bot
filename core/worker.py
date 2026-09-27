@@ -13,17 +13,16 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Callable, Awaitable
+from typing import Awaitable, Callable
 
 from core.cache import CacheProtocol
-
-
 from core.config import (
     DOWNLOAD_DIR,
     MAX_CONCURRENT_DOWNLOADS,
     MAX_FILESIZE_MB,
     YTDLP_FORMAT,
 )
+from core.metadata import get_video_metadata
 from engine.extractors.smart_extractor import SmartExtractor
 
 logger = logging.getLogger("worker")
@@ -35,22 +34,22 @@ ProgressCallback = Callable[[str, float], Awaitable[None]]
 """Signature: (status_text, percent_0_to_100) -> None"""
 
 # Quality → yt-dlp format string
-# TikTok serves mp4 as the video container. Filtering by ext=mp4 is more
-# reliable than vcodec!='none' because TikTok uses bytevc1 which yt-dlp
-# may not recognize in vcodec filters. --merge-output-format mp4 handles muxing.
+# Every non-audio selector must require a video stream. The former trailing
+# ``/best`` fallback could legally resolve to TikTok's music-only m4a format.
+# ``bestvideo*`` also accepts progressive formats that already contain audio.
 _QUALITY_FORMAT: dict[str, str] = {
-    "144":  "best[height<=144][ext=mp4]/best[height<=360][ext=mp4]/best[ext=mp4]/best",
-    "360":  "best[height<=360][ext=mp4]/best[ext=mp4]/best",
-    "480":  "best[height<=480][ext=mp4]/best[ext=mp4]/best",
-    "720":  "best[height<=720][ext=mp4]/best[ext=mp4]/best",
-    "1080": "best[height<=1080][ext=mp4]/best[ext=mp4]/best",
-    "best": "best[ext=mp4]/best",
+    "144": "bestvideo*[height<=144]+bestaudio/bestvideo*[height<=144]/bestvideo*+bestaudio/bestvideo*",
+    "360": "bestvideo*[height<=360]+bestaudio/bestvideo*[height<=360]/bestvideo*+bestaudio/bestvideo*",
+    "480": "bestvideo*[height<=480]+bestaudio/bestvideo*[height<=480]/bestvideo*+bestaudio/bestvideo*",
+    "720": "bestvideo*[height<=720]+bestaudio/bestvideo*[height<=720]/bestvideo*+bestaudio/bestvideo*",
+    "1080": "bestvideo*[height<=1080]+bestaudio/bestvideo*[height<=1080]/bestvideo*+bestaudio/bestvideo*",
+    "best": "bestvideo*+bestaudio/bestvideo*",
     "audio": "bestaudio/best",   # audio-only → will be sent as voice/audio message
 }
 
 
 # Bump this version when format strings change to invalidate all stale cache entries
-_CACHE_VERSION = "v4"
+_CACHE_VERSION = "v5"
 
 def _url_cache_key(url: str) -> str:
     return f"dl:{_CACHE_VERSION}:" + hashlib.sha256(url.encode()).hexdigest()
@@ -78,10 +77,21 @@ async def download_video(
         if cached:
             cached_path = Path(cached)
             if cached_path.exists():
-                logger.info("Cache hit for %s", url)
-                if on_progress:
-                    await on_progress("📦 من الكاش", 100.0)
-                return cached_path
+                if quality == "audio":
+                    logger.info("Download cache hit")
+                    if on_progress:
+                        await on_progress("📦 من الكاش", 100.0)
+                    return cached_path
+
+                cached_meta = await asyncio.to_thread(get_video_metadata, cached_path)
+                if cached_meta.get("width", 0) > 0 and cached_meta.get("height", 0) > 0:
+                    logger.info("Download cache hit")
+                    if on_progress:
+                        await on_progress("📦 من الكاش", 100.0)
+                    return cached_path
+
+                logger.warning("Discarding audio-only cached result for video request: %s", cached_path)
+                await cache.delete(cache_key)
             else:
                 await cache.delete(cache_key)  # stale entry
 
@@ -139,6 +149,16 @@ async def download_video(
         raise RuntimeError("انتهى التحميل لكن الملف غير موجود.")
 
     result_path = matches[0]
+
+    # A non-audio request must never succeed with an audio-only fallback.
+    # Validate the actual stream rather than trusting the filename extension.
+    if quality != "audio":
+        metadata = await asyncio.to_thread(get_video_metadata, result_path)
+        if metadata.get("width", 0) <= 0 or metadata.get("height", 0) <= 0:
+            await cleanup_file(result_path)
+            raise RuntimeError(
+                "تم تنزيل ملف بلا مسار فيديو. رُفضت النتيجة لمنع إرسال صوت بدل الفيديو."
+            )
 
     # ── Cache the result ──────────────────────────────────────────────────────
     if cache is not None:
@@ -246,4 +266,3 @@ async def enhance_video(
 
     logger.info("Enhanced video saved to %s", out_path)
     return out_path
-

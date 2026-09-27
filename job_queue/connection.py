@@ -24,7 +24,7 @@ def get_redis_connection():
         client = redis.from_url(REDIS_URL, socket_connect_timeout=2, decode_responses=False)
         client.ping()
         _redis_conn = client
-        logger.info("Redis connected for queue at %s", REDIS_URL)
+        logger.info("Redis connected for queue")
     except Exception as exc:
         logger.warning("Redis unavailable for queue (%s) – using in-process fallback", exc)
         _redis_conn = None

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Callable, Awaitable
 
-from job_queue.job_store import create_job
+from job_queue.job_store import create_job, mark_error
 from job_queue.queue import enqueue_download
 
 if TYPE_CHECKING:
@@ -76,28 +75,7 @@ class MediaEngine:
         )
 
         if not enqueue_download(resolved_job_id, url, quality, chat_id):
-            logger.warning(
-                "Redis/RQ unavailable – running in-process fallback for job %s",
-                resolved_job_id,
-            )
-            asyncio.create_task(
-                self._run_fallback(resolved_job_id, url, quality, chat_id, on_progress)
-            )
+            mark_error(resolved_job_id, error="Worker queue unavailable")
+            raise RuntimeError("Redis/RQ worker queue is required")
 
         return MediaJobEnqueueResult(job_id=resolved_job_id, status="queued")
-
-    async def _run_fallback(
-        self,
-        job_id: str,
-        url: str,
-        quality: str,
-        chat_id: int | None,
-        on_progress: ProgressCallback | None,
-    ) -> None:
-        """In-process fallback when Redis/RQ is unavailable."""
-        from job_queue.tasks import execute_download
-
-        try:
-            await execute_download(job_id, url, quality, chat_id)
-        except Exception:
-            logger.exception("In-process fallback failed for job %s", job_id)

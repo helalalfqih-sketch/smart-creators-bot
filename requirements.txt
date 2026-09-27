@@ -7,6 +7,7 @@ yt-dlp[default,curl-cffi]>=2026.3.17
 redis>=5.0,<6.0        # optional – graceful fallback to memory cache if absent
 rq>=2.0,<3.0           # Redis Queue for background jobs
 requests>=2.32,<3.0    # sync HTTP client for bot → API gateway
+boto3>=1.35,<2.0       # private S3-compatible media storage + presigned URLs
 faster-whisper>=1.0.0  # speech transcription for pro captions feature
 python-dotenv>=1.0.0   # load .env file automatically
 psutil>=6.0,<8.0       # real CPU, RAM, disk, and process metrics
