@@ -216,7 +216,7 @@ def _download_payload(job: dict[str, Any]) -> dict[str, Any]:
         "platform": _platform_for_url(str(job.get("url", ""))),
         "status": status,
         "progress": round(float(job.get("progress", 0.0) or 0.0), 1),
-        "duration": _duration_text(job),
+        "duration": "—",
         "user": str(chat_id) if chat_id is not None else "unknown",
         "startedAt": str(job.get("started_at") or job.get("created_at") or ""),
     }

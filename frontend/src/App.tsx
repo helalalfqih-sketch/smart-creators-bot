@@ -1,5 +1,5 @@
 import { MediaLibrary } from './components/MediaLibrary';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { MetricsOverview } from './components/MetricsOverview';
 import { MediaDownloader } from './components/MediaDownloader';
@@ -30,7 +30,7 @@ export function App() {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<string>('downloader');
   const [metrics, setMetrics] = useState<SystemMetrics | null>(() => engine.getMetrics());
-  const [queue, setQueue] = useState<DashboardDownloadItem[]>(() => engine.getQueue());
+  const [queue, setQueue] = useState<DashboardDownloadItem[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>(() => engine.getLogs());
   const [settings, setSettings] = useState<EnvSettings | null>(() => engine.getSettings());
   const [online, setOnline] = useState<boolean>(true);
@@ -41,7 +41,11 @@ export function App() {
     return () => unsub();
   }, []);
 
+  const syncInFlight = useRef(false);
+
   const syncState = async () => {
+    if (syncInFlight.current) return;
+    syncInFlight.current = true;
     try {
       const [mRes, qRes, lRes, sRes] = await Promise.all([
         fetch('/api/metrics').catch(() => null),
@@ -85,6 +89,8 @@ export function App() {
       setOnline(true);
     } catch {
       setOnline(false);
+    } finally {
+      syncInFlight.current = false;
     }
   };
 
@@ -129,7 +135,6 @@ export function App() {
 
     const unsubMetrics = engine.onMetrics((nextMetrics) => {
       setMetrics(nextMetrics);
-      setQueue(engine.getQueue());
       setOnline(true);
     });
 
