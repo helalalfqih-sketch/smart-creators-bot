@@ -259,6 +259,10 @@ export class EngineService {
   }
 
   // Load ONLY real persistent data directly from server endpoints
+  public async syncState() {
+    await this.loadPersistedData();
+  }
+
   private async loadPersistedData() {
     try {
       if (typeof fetch !== 'undefined') {
@@ -848,7 +852,8 @@ export class EngineService {
     this.addLog('WARN', `[${jobId}] تم حذف المهمة من الذاكرة`, 'job_queue.py');
     try {
       DatabaseService.getInstance().createAuditLog({
-        actor: 'ADMIN',
+        actor_id: 'dashboard-admin',
+        actor_type: 'admin',
         action: 'JOB_DELETED',
         target_resource: `job:${jobId}`,
         details: `حذف المهمة ${jobId} من طابور التحميل`,
@@ -1014,7 +1019,8 @@ export class EngineService {
       this.addLog('WARN', `تم حذف المستخدم (${key}) من لوحة الإدارة`, 'users_panel.py');
       try {
         DatabaseService.getInstance().createAuditLog({
-          actor: 'ADMIN',
+          actor_id: 'dashboard-admin',
+        actor_type: 'admin',
           action: 'USER_DELETED',
           target_resource: `user:${key}`,
           details: `حذف المستخدم ${key} من السجل العام`,

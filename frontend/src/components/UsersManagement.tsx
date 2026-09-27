@@ -168,7 +168,6 @@ export const UsersManagement: React.FC<UsersManagementProps> = () => {
     if (window.confirm(`هل أنت متأكد من حذف المستخدم (${user.first_name || user.chat_id})؟`)) {
       engine.deleteUser(user.chat_id);
       setUsers(engine.getUsers());
-      onRefresh?.();
       toast.info('تم حذف المستخدم من السجل');
     }
   };

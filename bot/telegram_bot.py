@@ -213,7 +213,8 @@ async def _send_result_media_unlocked(
     emit_flow("TELEGRAM_DELIVERY_STARTED", source="telegram", job_id=job_id, detail=f"type={media_type or 'unknown'}")
 
     if media_type != "video":
-        await context.bot.send_document(chat_id=chat_id, document=media_source)
+        sent_message = await context.bot.send_document(chat_id=chat_id, document=media_source)
+        await _catalog_message(sent_message, direction="sent", job_id=job_id)
         logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
         emit_flow("TELEGRAM_DOCUMENT_SENT", source="telegram", job_id=job_id)
         await asyncio.to_thread(confirm_job_delivery, job_id)
@@ -221,7 +222,7 @@ async def _send_result_media_unlocked(
         return
 
     try:
-        await context.bot.send_video(
+        sent_message = await context.bot.send_video(
             chat_id=chat_id,
             video=media_source,
             duration=duration,
@@ -230,6 +231,7 @@ async def _send_result_media_unlocked(
             supports_streaming=True,
             reply_markup=reply_markup,
         )
+        await _catalog_message(sent_message, direction="sent", job_id=job_id)
         logger.info("TELEGRAM_VIDEO_SENT job_id=%s", job_id)
         emit_flow("TELEGRAM_VIDEO_SENT", source="telegram", job_id=job_id, detail="4k_button=yes" if offer_4k else "4k_button=no")
     except (BadRequest, TelegramError, asyncio.TimeoutError, ValueError) as exc:
@@ -250,11 +252,12 @@ async def _send_result_media_unlocked(
                 logger.info("TELEGRAM_MEDIA_MATERIALIZE_COMPLETED job_id=%s", job_id)
                 emit_flow("TELEGRAM_MEDIA_MATERIALIZE_COMPLETED", source="telegram", job_id=job_id)
 
-            await context.bot.send_document(
+            sent_message = await context.bot.send_document(
                 chat_id=chat_id,
                 document=document_source,
                 reply_markup=reply_markup,
             )
+            await _catalog_message(sent_message, direction="sent", job_id=job_id)
             logger.info("TELEGRAM_DOCUMENT_SENT job_id=%s", job_id)
             emit_flow("TELEGRAM_DOCUMENT_SENT", source="telegram", job_id=job_id, detail="fallback=yes")
         finally:
@@ -609,6 +612,20 @@ async def handle_convert_4k(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
 
+async def _catalog_message(message, *, direction: str, job_id: str | None = None) -> None:
+    # A catalog outage must never cause an already-sent video to be sent again.
+    from storage.media_library import record_message
+    try:
+        await asyncio.to_thread(record_message, message, direction=direction, job_id=job_id)
+    except Exception as exc:
+        logger.warning("MEDIA_CATALOG_FAILED error_type=%s", type(exc).__name__)
+
+
+async def handle_received_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_message:
+        await _catalog_message(update.effective_message, direction="received")
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(context.error, Forbidden):
         return
@@ -660,6 +677,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(handle_convert_4k, pattern=r"^convert4k:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_received_media))
     app.add_error_handler(error_handler)
 
     logger.info("Telegram production poller started")

@@ -141,6 +141,21 @@ app = FastAPI(
 )
 
 
+def require_media_library_auth(
+    authorization: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+    credentials: HTTPBasicCredentials | None = Depends(_dashboard_security),
+) -> None:
+    # Private chat media must fail closed even if legacy endpoints permit no-password mode.
+    if not (os.getenv("ADMIN_API_TOKEN", "").strip() or os.getenv("DASHBOARD_PASSWORD", "").strip()):
+        raise HTTPException(503, "Configure dashboard authentication before enabling media library")
+    require_admin_auth(authorization, x_admin_token, credentials)
+
+
+from api.media_library import router as media_library_router
+app.include_router(media_library_router, dependencies=[Depends(require_media_library_auth)])
+
+
 @app.get("/docs", include_in_schema=False, dependencies=[Depends(require_dashboard_auth)])
 async def custom_swagger_ui():
     return get_swagger_ui_html(openapi_url="/openapi.json", title="Smart Creators API - Documentation")
