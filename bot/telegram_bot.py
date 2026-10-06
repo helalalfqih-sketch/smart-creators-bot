@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import os
 import re
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 
+from bot.polling_lock import PollingLease
 from core.config import BOT_TOKEN, DOWNLOAD_API_URL
 
 logger = logging.getLogger("bot")
@@ -365,8 +367,21 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_error_handler(error_handler)
 
-    logger.info("🤖 Bot polling started | API Gateway mode")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    lease = PollingLease()
+    lock_wait_seconds = max(5, int(os.getenv("TELEGRAM_POLLING_LOCK_WAIT_SECONDS", "15")))
+
+    while not lease.acquire():
+        logger.warning(
+            "Another bot instance owns the Telegram polling lease; retrying in %ss",
+            lock_wait_seconds,
+        )
+        time.sleep(lock_wait_seconds)
+
+    try:
+        logger.info("🤖 Bot polling started | API Gateway mode")
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    finally:
+        lease.release()
 
 
 if __name__ == "__main__":

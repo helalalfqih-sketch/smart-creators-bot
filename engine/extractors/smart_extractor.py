@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -165,7 +166,9 @@ class SmartExtractor:
         max_bytes: int,
     ) -> list[str]:
         cmd = [
-            "yt-dlp",
+            sys.executable,
+            "-m",
+            "yt_dlp",
             "--no-playlist",
             "--no-warnings",
             "--newline",
@@ -205,7 +208,7 @@ class SmartExtractor:
         cmd = self._common_args(url, out_template, format_string, max_bytes)
 
         if cookies_path is not None:
-            cmd[1:1] = ["--cookies", str(cookies_path)]
+            cmd[3:3] = ["--cookies", str(cookies_path)]
 
         cmd.append(url)
         return cmd
@@ -225,7 +228,7 @@ class SmartExtractor:
             max_bytes,
             cookies_path,
         )
-        cmd[1:1] = ["--extractor-retries", str(EXTRACTOR_RETRIES)]
+        cmd[3:3] = ["--extractor-retries", str(EXTRACTOR_RETRIES)]
         return cmd
 
     def _build_browser_cmd(
@@ -236,7 +239,7 @@ class SmartExtractor:
         max_bytes: int,
     ) -> list[str]:
         cmd = self._common_args(url, out_template, format_string, max_bytes)
-        cmd[1:1] = ["--cookies-from-browser", self.browser]
+        cmd[3:3] = ["--cookies-from-browser", self.browser]
         cmd.append(url)
         return cmd
 
