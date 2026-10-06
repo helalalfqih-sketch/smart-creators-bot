@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
+import sys
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -55,6 +57,19 @@ def _is_douyin_url(url: str) -> bool:
 
 def _is_tiktok_url(url: str) -> bool:
     return "tiktok.com" in url
+
+
+def _browser_cookie_fallback_enabled() -> bool:
+    """Use desktop-browser cookies only where a browser profile can reasonably exist.
+
+    Render containers do not carry the operator's Chrome profile, so attempting
+    --cookies-from-browser there always fails unless explicitly opted in.
+    """
+    explicit = os.getenv("ENABLE_BROWSER_COOKIE_FALLBACK")
+    if explicit is not None:
+        return explicit.strip().lower() in {"1", "true", "yes", "on"}
+
+    return not bool(os.getenv("RENDER_SERVICE_NAME") or os.getenv("RENDER_SERVICE_ID"))
 
 
 def _resolve_cookies_path(url: str) -> Path | None:
@@ -125,17 +140,20 @@ class SmartExtractor:
                 )
             )
 
-        strategies.append(
-            (
-                "browser",
-                self._build_browser_cmd(
-                    normalized_url,
-                    out_template,
-                    format_string,
-                    max_bytes,
-                ),
+        if _browser_cookie_fallback_enabled():
+            strategies.append(
+                (
+                    "browser",
+                    self._build_browser_cmd(
+                        normalized_url,
+                        out_template,
+                        format_string,
+                        max_bytes,
+                    ),
+                )
             )
-        )
+        else:
+            logger.info("Skipping browser-cookie fallback in managed Render runtime")
 
         last_lines: list[str] = []
         last_mode = "primary"
@@ -225,7 +243,7 @@ class SmartExtractor:
                         on_line(msg)
                     return ExtractResult(output_lines=[msg], mode="proxy_api")
         except Exception as exc:
-            logger.warning("Proxy API fallback failed: %s", type(exc).__name__)
+            logger.warning("Proxy API fallback failed: %s: %s", type(exc).__name__, exc)
         return None
 
     def _common_args(
@@ -236,7 +254,9 @@ class SmartExtractor:
         max_bytes: int,
     ) -> list[str]:
         cmd = [
-            "yt-dlp",
+            sys.executable,
+            "-m",
+            "yt_dlp",
             "--no-playlist",
             "--no-warnings",
             "--newline",
@@ -276,7 +296,7 @@ class SmartExtractor:
         cmd = self._common_args(url, out_template, format_string, max_bytes)
 
         if cookies_path is not None:
-            cmd[1:1] = ["--cookies", str(cookies_path)]
+            cmd[3:3] = ["--cookies", str(cookies_path)]
 
         cmd.append(url)
         return cmd
@@ -296,7 +316,7 @@ class SmartExtractor:
             max_bytes,
             cookies_path,
         )
-        cmd[1:1] = ["--extractor-retries", str(EXTRACTOR_RETRIES)]
+        cmd[3:3] = ["--extractor-retries", str(EXTRACTOR_RETRIES)]
         return cmd
 
     def _build_browser_cmd(
@@ -307,7 +327,7 @@ class SmartExtractor:
         max_bytes: int,
     ) -> list[str]:
         cmd = self._common_args(url, out_template, format_string, max_bytes)
-        cmd[1:1] = ["--cookies-from-browser", self.browser]
+        cmd[3:3] = ["--cookies-from-browser", self.browser]
         cmd.append(url)
         return cmd
 
