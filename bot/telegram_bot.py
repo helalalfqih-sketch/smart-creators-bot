@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import os
 import re
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 
+from bot.polling_lock import PollingLease
 from core.config import BOT_TOKEN, DOWNLOAD_API_URL
 
 logger = logging.getLogger("bot")
