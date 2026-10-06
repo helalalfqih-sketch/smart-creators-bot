@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -165,7 +166,9 @@ class SmartExtractor:
         max_bytes: int,
     ) -> list[str]:
         cmd = [
-            "yt-dlp",
+            sys.executable,
+            "-m",
+            "yt_dlp",
             "--no-playlist",
             "--no-warnings",
             "--newline",
