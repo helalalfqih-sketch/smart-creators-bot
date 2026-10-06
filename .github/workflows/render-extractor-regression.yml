@@ -1,0 +1,20 @@
+name: Render Extractor Regression
+
+on:
+  pull_request:
+  push:
+    branches:
+      - fix/p0-telegram-delivery-production
+
+jobs:
+  extractor-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile changed Python paths
+        run: python -m compileall -q engine tests
+      - name: Run extractor fallback tests
+        run: python -m unittest tests.test_smart_extractor_fallback
